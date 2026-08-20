@@ -1,0 +1,907 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CyberFan — eight appliances, synthesized from scratch</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<meta name="description" content="A rack of cooling appliances with working gears and sound built entirely from oscillators and filtered noise. No audio files." />
+<style>
+  :root{
+    --bg:#0a0d14; --bg2:#0c1018; --panel:#0e131d;
+    --ink:#eceef3; --dim:#a7afc0; --faint:#7c869a;
+    --accent:#4fd6c0; --accent2:#8b93ff; --warm:#ff9f43;
+    --line:rgba(255,255,255,.10); --line2:rgba(255,255,255,.06);
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:radial-gradient(1200px 700px at 50% -10%, #131a27 0%, var(--bg) 60%);
+    color:var(--ink); font:14px/1.5 ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    padding:20px 16px 28px; -webkit-font-smoothing:antialiased;
+  }
+  /* The chill tint drifts with the placebo temperature — cool blue when cooling,
+     amber when the hair dryer is winning. */
+  body::after{
+    content:""; position:fixed; inset:0; pointer-events:none; z-index:0;
+    background:radial-gradient(900px 600px at 50% 40%, var(--tint,transparent) 0%, transparent 70%);
+    opacity:var(--tintA,0); transition:opacity .8s linear;
+  }
+  .shell{position:relative; z-index:1; width:min(1120px,100%); margin:0 auto}
+
+  header{display:flex; align-items:flex-end; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:18px}
+  h1{margin:0; font-size:clamp(19px,3vw,26px); font-weight:600; letter-spacing:-.01em}
+  h1 b{color:var(--accent); font-weight:600}
+  .sub{margin:4px 0 0; color:var(--faint); font-size:12px}
+  .micro{font-size:10.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--faint)}
+
+  .grid{display:grid; grid-template-columns:210px minmax(0,1fr) 210px; gap:14px; align-items:start}
+  .panel{background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:14px}
+  .panel > .micro{display:block; margin-bottom:10px}
+
+  /* ── device list ────────────────────────────────────────────────────────── */
+  .devs{display:flex; flex-direction:column; gap:4px}
+  .dev{display:flex; align-items:center; gap:10px; width:100%; text-align:left; cursor:pointer;
+       background:transparent; border:1px solid transparent; border-radius:11px; padding:8px 10px;
+       color:var(--dim); font:inherit; transition:background .16s ease, color .16s ease, border-color .16s ease}
+  .dev:hover{background:rgba(255,255,255,.035); color:var(--ink)}
+  .dev[aria-selected="true"]{background:rgba(79,214,192,.10); border-color:rgba(79,214,192,.34); color:var(--ink)}
+  .dev .idx{color:var(--faint); font-size:11px; width:12px; flex:none}
+  .dev[aria-selected="true"] .idx{color:var(--accent)}
+  .dev .nm{display:flex; flex-direction:column; line-height:1.25; min-width:0}
+  .dev .nm b{font-weight:500; font-size:13px; white-space:nowrap}
+  .dev .nm small{font-size:10.5px; color:var(--faint)}
+
+  /* ── stage ──────────────────────────────────────────────────────────────── */
+  .stage{position:relative; border:1px solid var(--line); border-radius:18px; overflow:hidden;
+         background:linear-gradient(180deg,#0b0f17,#080b11); box-shadow:0 24px 60px rgba(0,0,0,.45)}
+  canvas#stage{display:block; width:100%; height:auto}
+  .badges{position:absolute; inset:12px 12px auto; display:flex; gap:7px; flex-wrap:wrap; pointer-events:none}
+  .pill{background:rgba(10,13,20,.66); border:1px solid var(--line); border-radius:999px;
+        padding:4px 10px; backdrop-filter:blur(6px); font-size:11px; display:flex; gap:7px; align-items:center}
+  .pill[hidden]{display:none}
+  .pill .k{color:var(--faint)}
+  .pill .v{color:var(--ink); font-variant-numeric:tabular-nums}
+  .pill.hot .v{color:var(--warm)}
+  .dot{width:7px; height:7px; border-radius:50%; background:var(--faint); flex:none}
+  .dot.on{background:var(--accent); box-shadow:0 0 8px rgba(79,214,192,.85)}
+  .dot.warm{background:var(--warm); box-shadow:0 0 8px rgba(255,159,67,.85)}
+
+  .tapstart{position:absolute; inset:0; display:grid; place-items:center; cursor:pointer;
+            background:rgba(8,11,17,.72); backdrop-filter:blur(3px); text-align:center; padding:20px}
+  .tapstart.gone{display:none}
+  .tapstart p{margin:0; color:var(--dim); font-size:13px; max-width:34ch; line-height:1.7}
+  .tapstart b{display:block; color:var(--ink); font-size:16px; margin-bottom:8px; font-weight:600}
+
+  /* ── controls ───────────────────────────────────────────────────────────── */
+  .controls{display:grid; grid-template-columns:minmax(0,1fr) auto; gap:14px; margin-top:14px; align-items:center}
+  .gears{display:flex; gap:7px; flex-wrap:wrap}
+  .gear{cursor:pointer; border:1px solid var(--line); background:transparent; color:var(--dim);
+        border-radius:999px; padding:8px 16px; font:inherit; font-size:12px; letter-spacing:.03em;
+        transition:all .16s ease; min-width:62px}
+  .gear:hover{color:var(--ink); border-color:rgba(255,255,255,.22)}
+  .gear[aria-pressed="true"]{background:var(--accent); border-color:var(--accent); color:#04130f; font-weight:600}
+  .gear.off[aria-pressed="true"]{background:transparent; border-color:rgba(255,255,255,.30); color:var(--ink); font-weight:600}
+  .toggles{display:flex; gap:7px; align-items:center; flex-wrap:wrap}
+  .tgl{cursor:pointer; border:1px solid var(--line); background:transparent; color:var(--dim);
+       border-radius:999px; padding:8px 14px; font:inherit; font-size:12px; display:flex; gap:8px; align-items:center;
+       transition:all .16s ease}
+  .tgl:hover{color:var(--ink)}
+  .tgl[aria-pressed="true"]{color:var(--ink); border-color:rgba(79,214,192,.42); background:rgba(79,214,192,.10)}
+  .tgl[hidden]{display:none}
+  .vol{display:flex; align-items:center; gap:9px; color:var(--faint); font-size:11px}
+  input[type=range]{-webkit-appearance:none; appearance:none; width:92px; height:3px; border-radius:2px;
+                    background:rgba(255,255,255,.16); outline:none}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none; width:13px; height:13px; border-radius:50%;
+    background:var(--accent); cursor:pointer; border:2px solid #0a0d14}
+  input[type=range]::-moz-range-thumb{width:11px; height:11px; border-radius:50%; background:var(--accent);
+    cursor:pointer; border:2px solid #0a0d14}
+
+  /* ── readouts ───────────────────────────────────────────────────────────── */
+  .temp{text-align:center; padding:6px 0 12px; border-bottom:1px solid var(--line2); margin-bottom:12px}
+  .temp .n{font-size:34px; font-weight:600; letter-spacing:-.03em; font-variant-numeric:tabular-nums; line-height:1}
+  .temp .u{font-size:15px; color:var(--faint); font-weight:400}
+  .temp .cap{margin-top:6px; font-size:10px; color:var(--faint); line-height:1.5}
+  canvas#spec{display:block; width:100%; height:64px; border-radius:9px; background:rgba(0,0,0,.28); margin-bottom:12px}
+  .rows{display:flex; flex-direction:column; gap:6px; font-size:11.5px}
+  .row{display:flex; justify-content:space-between; gap:8px}
+  .row .k{color:var(--faint)}
+  .row .v{color:var(--ink); font-variant-numeric:tabular-nums; text-align:right}
+  .note{margin-top:12px; padding-top:11px; border-top:1px solid var(--line2); color:var(--faint);
+        font-size:10.5px; line-height:1.6}
+
+  footer{margin-top:18px; display:flex; justify-content:space-between; gap:14px; flex-wrap:wrap;
+         color:var(--faint); font-size:11px}
+  footer a{color:var(--dim); text-decoration:none; border-bottom:1px solid var(--line)}
+  footer a:hover{color:var(--accent); border-color:var(--accent)}
+  kbd{background:#171d29; border:1px solid var(--line); border-bottom-width:2px; border-radius:4px;
+      padding:1px 5px; font:inherit; font-size:10px; color:var(--dim)}
+
+  @media (max-width:980px){
+    .grid{grid-template-columns:1fr}
+    .devs{flex-direction:row; overflow-x:auto; gap:6px; padding-bottom:4px; scrollbar-width:thin}
+    .dev{flex:none}
+    .controls{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <header>
+    <div>
+      <h1>Cyber<b>Fan</b></h1>
+      <p class="sub">Eight appliances. Real gears. Every sound built from oscillators and filtered noise — no audio files.</p>
+    </div>
+    <div class="micro" id="ctxState">audio · idle</div>
+  </header>
+
+  <div class="grid">
+
+    <div class="panel">
+      <span class="micro">// appliances</span>
+      <div class="devs" id="devs" role="listbox" aria-label="Appliance"></div>
+    </div>
+
+    <div>
+      <div class="stage">
+        <canvas id="stage" width="1120" height="660"></canvas>
+        <div class="badges">
+          <div class="pill"><span class="dot" id="dotRun"></span><span class="k">gear</span><span class="v" id="bGear">off</span></div>
+          <div class="pill"><span class="k">rpm</span><span class="v" id="bRpm">0</span></div>
+          <div class="pill"><span class="k">blade&nbsp;pass</span><span class="v" id="bBlade">—</span></div>
+          <div class="pill" id="pillAux" hidden><span class="dot" id="dotAux"></span><span class="k" id="kAux">compressor</span><span class="v" id="bAux">off</span></div>
+        </div>
+        <div class="tapstart" id="tapstart">
+          <p><b>Click to power the rack</b>Browsers keep audio silent until you interact with the page, so the first click is what starts the AudioContext. Headphones are worth it — a lot of this lives below 100&nbsp;Hz.</p>
+        </div>
+      </div>
+
+      <div class="controls">
+        <div class="gears" id="gears" role="group" aria-label="Gear"></div>
+        <div class="toggles">
+          <button class="tgl" id="tOsc" aria-pressed="false"><span class="dot" id="dotOsc"></span>oscillate</button>
+          <button class="tgl" id="tHeat" aria-pressed="false" hidden><span class="dot" id="dotHeat"></span>heat</button>
+          <label class="vol">vol<input type="range" id="vol" min="0" max="100" value="70" aria-label="Volume"></label>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <span class="micro">// perceived</span>
+      <div class="temp">
+        <div><span class="n" id="tempN">34.0</span><span class="u">°C</span></div>
+        <div class="cap">Placebo. Nothing is measured — this number is a function of how long the thing has been running.</div>
+      </div>
+      <canvas id="spec" width="360" height="128"></canvas>
+      <div class="rows">
+        <div class="row"><span class="k">noise cutoff</span><span class="v" id="rCut">—</span></div>
+        <div class="row"><span class="k">resonance</span><span class="v" id="rRes">—</span></div>
+        <div class="row"><span class="k">motor whine</span><span class="v" id="rWhine">—</span></div>
+        <div class="row"><span class="k">spin-up τ</span><span class="v" id="rUp">—</span></div>
+        <div class="row"><span class="k">coast-down τ</span><span class="v" id="rDown">—</span></div>
+        <div class="row"><span class="k">voices</span><span class="v" id="rVoices">—</span></div>
+      </div>
+      <p class="note" id="note"></p>
+    </div>
+
+  </div>
+
+  <footer>
+    <div><kbd>1</kbd>–<kbd>8</kbd> appliance · <kbd>↑</kbd><kbd>↓</kbd> gear · <kbd>Space</kbd> on / off · <kbd>O</kbd> oscillate</div>
+    <div>© 2026 Weiren Feng · <a href="https://github.com/renrenmimi">github.com/renrenmimi</a></div>
+  </footer>
+
+</div>
+
+<script>
+(() => {
+"use strict";
+
+// ── appliances ──────────────────────────────────────────────────────────────
+// Every device is the same synth patched differently. Three noise paths (broadband
+// air, a resonant peak, a low rumble), five harmonic partials driven by the blade-pass
+// frequency, and one sawtooth for universal-motor whine. What separates a hair dryer
+// from an air conditioner is entirely in these numbers.
+//   f  : [value at the lowest gear, value at full] in Hz, swept exponentially
+//   g  : gain at full throttle;  k : how fast that gain grows with the gear
+const DEVICES = [
+  {
+    id:"deskfan", name:"Desk Fan", zh:"台扇", render:"fan",
+    blades:5, rpm:[180,640], gears:["low","med","high"], gearLevel:[.40,.68,1.0],
+    spin:{up:1.1,down:3.0}, sweep:true, cool:4.5,
+    air:{g:.34,k:1.20,f:[280,2100],q:.7},
+    res:{g:.085,k:1.5,f:[380,820],q:2.2},
+    rum:{g:.10,k:1.1,f:[70,120],q:1.0},
+    tone:{g:.070,k:1.5,harm:[1,.6,.35,.18,.08],beat:0},
+    note:"Five blades at 640 rpm put the blade-pass tone at 53 Hz — you feel it more than you hear it."
+  },
+  {
+    id:"tower", name:"Tower Fan", zh:"塔扇", render:"tower",
+    blades:23, rpm:[140,420], gears:["sleep","normal","turbo"], gearLevel:[.38,.66,1.0],
+    spin:{up:1.4,down:2.6}, sweep:true, cool:5.0,
+    air:{g:.31,k:1.15,f:[340,2600],q:.6},
+    res:{g:.05,k:1.4,f:[520,1100],q:1.6},
+    rum:{g:.07,k:1.1,f:[80,130],q:1.0},
+    tone:{g:.028,k:1.6,harm:[1,.3,.12],beat:0},
+    note:"A cross-flow drum has 23 short blades instead of 5 long ones, which pushes the tone up to 160 Hz and smooths it into the noise."
+  },
+  {
+    id:"ac", name:"Air Conditioner", zh:"空调", render:"ac",
+    blades:35, rpm:[90,260], gears:["eco","cool","turbo"], gearLevel:[.42,.70,1.0],
+    spin:{up:2.2,down:4.0}, sweep:true, cool:7.5,
+    air:{g:.30,k:1.10,f:[260,1500],q:.6},
+    res:{g:.06,k:1.3,f:[300,600],q:1.8},
+    rum:{g:.24,k:.9,f:[55,95],q:1.3},
+    tone:{g:.022,k:1.5,harm:[1,.35,.15],beat:0},
+    cycle:{on:11,off:7,ramp:1.8,label:"compressor",affects:["rum","tone"]},
+    note:"The blower never stops; the compressor does. It cuts in and out on its own timer and takes the bottom of the spectrum with it."
+  },
+  {
+    id:"dryer", name:"Hair Dryer", zh:"吹风机", render:"dryer",
+    blades:11, rpm:[4000,9000], gears:["I","II"], gearLevel:[.55,1.0],
+    spin:{up:.55,down:.9}, sweep:false, heat:true, cool:1.2,
+    air:{g:.30,k:1.30,f:[900,7000],q:.5},
+    res:{g:.07,k:1.5,f:[1200,2600],q:3.0},
+    rum:{g:.04,k:1.2,f:[90,150],q:1.0},
+    tone:{g:.020,k:1.6,harm:[1,.4,.2],beat:0},
+    whine:{g:.095,k:1.9,f0:[140,330],lp:[1200,5200]},
+    note:"The only device here with a universal motor, so it gets a sawtooth: a buzzy harmonic stack at 330 Hz. Heat loads the motor and drags the pitch down."
+  },
+  {
+    id:"hood", name:"Range Hood", zh:"抽油烟机", render:"hood",
+    blades:9, rpm:[300,900], gears:["1","2","3"], gearLevel:[.44,.72,1.0],
+    spin:{up:1.0,down:2.2}, sweep:false, cool:2.0,
+    air:{g:.32,k:1.20,f:[300,1900],q:.6},
+    res:{g:.13,k:1.2,f:[170,240],q:5.5},
+    rum:{g:.12,k:1.0,f:[70,110],q:1.1},
+    tone:{g:.045,k:1.5,harm:[1,.5,.25,.12],beat:0},
+    note:"A metre of steel duct is a resonator. Q of 5.5 at 200 Hz is the whole reason this sounds boxy and the desk fan does not."
+  },
+  {
+    id:"rack", name:"Server Rack", zh:"服务器机柜", render:"rack",
+    blades:7, rpm:[2200,7000], gears:["idle","load","thermal"], gearLevel:[.38,.66,1.0],
+    spin:{up:1.6,down:2.4}, sweep:false, cool:3.5,
+    air:{g:.27,k:1.25,f:[500,5200],q:.5},
+    res:{g:.07,k:1.4,f:[700,1800],q:3.0},
+    rum:{g:.10,k:1.0,f:[80,140],q:1.1},
+    tone:{g:.045,k:1.6,harm:[1,.5,.28,.14,.07],beat:4.5},
+    note:"Four fans that never quite agree. The second partial bank runs 4.5 Hz off the first, and the interference between them is that slow throb."
+  },
+  {
+    id:"fridge", name:"Refrigerator", zh:"冰箱", render:"fridge",
+    blades:5, rpm:[1080,1440], gears:["idle","boost"], gearLevel:[.60,1.0],
+    spin:{up:1.8,down:3.6}, sweep:false, cool:1.5,
+    air:{g:.10,k:1.1,f:[180,700],q:.7},
+    res:{g:.09,k:1.2,f:[110,130],q:6.0},
+    rum:{g:.18,k:.9,f:[55,110],q:1.4},
+    tone:{g:.070,k:1.3,harm:[1,.5,.3,.2,.1],beat:0},
+    cycle:{on:13,off:9,ramp:2.2,label:"compressor",affects:["rum","tone","res"]},
+    note:"Blade pass lands on 120 Hz, which is exactly twice mains frequency — the same hum the compressor makes. Standing next to it does not cool the room down, it warms it up."
+  },
+  {
+    id:"cabin", name:"Aircraft Cabin", zh:"客舱", render:"cabin",
+    blades:24, rpm:[300,560], gears:["taxi","climb","cruise"], gearLevel:[.45,.74,1.0],
+    spin:{up:3.5,down:6.0}, sweep:false, cool:6.0,
+    air:{g:.40,k:1.05,f:[160,900],q:.5},
+    res:{g:.05,k:1.2,f:[190,300],q:2.0},
+    rum:{g:.30,k:.85,f:[60,110],q:1.2},
+    tone:{g:.020,k:1.4,harm:[1,.4,.2,.1],beat:1.2},
+    note:"Spin-up takes 3.5 seconds against 0.55 for the hair dryer. Inertia is most of what makes a big machine sound big."
+  },
+];
+
+const PARTIALS = 5;
+const AMBIENT  = 34.0;   // it is, as reported, extremely hot
+
+// ── helpers ─────────────────────────────────────────────────────────────────
+const clamp = (v,a,b) => v < a ? a : v > b ? b : v;
+const lerp  = (a,b,t) => a + (b-a)*t;
+const expLerp = (a,b,t) => a * Math.pow(b/a, t);     // the right way to sweep a frequency
+const curve = (lv,k) => Math.pow(clamp(lv,0,1), k);
+// A stopped motor is stopped. Without this the rotor would snap to its idle rpm the
+// instant the level leaves zero, and the blade-pass tone would snap with it.
+const rpmOf = (d,lv) => lv < 1e-4 ? 0 : expLerp(d.rpm[0], d.rpm[1], lv) * Math.min(1, lv/.10);
+
+// ── state ───────────────────────────────────────────────────────────────────
+const S = {
+  dev: DEVICES[0],
+  gear: 0,          // index into dev.gears
+  on: false,
+  level: 0,         // the single number everything else is derived from, 0..1
+  sweep: false,     // head oscillation
+  heat: false,
+  vol: .70,
+  headPhase: 0,
+  spinAngle: 0,
+  cycleOn: true, cycleT: 0, cycleGain: 1,
+  rotorAngle: 0,
+  temp: AMBIENT,
+  started: false,
+};
+
+// ── audio graph ─────────────────────────────────────────────────────────────
+// Built once on the first gesture, then never rebuilt. Switching appliances only
+// re-aims parameters, which is what lets one machine coast down while the next
+// spins up instead of clicking.
+let AU = null;
+
+function noiseBuffer(ctx, seconds){
+  const buf = ctx.createBuffer(1, ctx.sampleRate * seconds, ctx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random()*2 - 1;
+  return buf;
+}
+
+function buildAudio(){
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+
+  const limiter = ctx.createDynamicsCompressor();
+  limiter.threshold.value = -8; limiter.knee.value = 6;
+  limiter.ratio.value = 12; limiter.attack.value = .004; limiter.release.value = .18;
+
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 2048; analyser.smoothingTimeConstant = .78;
+
+  const master = ctx.createGain(); master.gain.value = S.vol;
+  const panner = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+  const bus    = ctx.createGain(); bus.gain.value = 1;
+
+  bus.connect(panner || master);
+  if (panner) panner.connect(master);
+  master.connect(limiter); limiter.connect(analyser); analyser.connect(ctx.destination);
+
+  // two decorrelated noise sources so the rumble is not a filtered copy of the hiss
+  const srcA = ctx.createBufferSource(); srcA.buffer = noiseBuffer(ctx,3); srcA.loop = true;
+  const srcB = ctx.createBufferSource(); srcB.buffer = noiseBuffer(ctx,3); srcB.loop = true;
+
+  const mk = (type, src, q) => {
+    const f = ctx.createBiquadFilter(); f.type = type; f.Q.value = q;
+    const g = ctx.createGain(); g.gain.value = 0;
+    src.connect(f); f.connect(g); g.connect(bus);
+    return {f,g};
+  };
+  const hp = ctx.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 55;
+  srcA.connect(hp);
+
+  const air = mk("lowpass",  hp,   .7);
+  const res = mk("bandpass", hp,  2.0);
+  const rum = mk("lowpass",  srcB, 1.2);
+
+  // two partial banks; bank B is detuned by a few Hz to produce audible beating
+  const bank = () => Array.from({length: PARTIALS}, () => {
+    const o = ctx.createOscillator(); o.type = "sine";
+    const g = ctx.createGain(); g.gain.value = 0;
+    o.connect(g); g.connect(bus); o.start();
+    return {o,g};
+  });
+  const toneA = bank(), toneB = bank();
+
+  const wo = ctx.createOscillator(); wo.type = "sawtooth";
+  const wf = ctx.createBiquadFilter(); wf.type = "lowpass"; wf.Q.value = .9;
+  const wg = ctx.createGain(); wg.gain.value = 0;
+  wo.connect(wf); wf.connect(wg); wg.connect(bus); wo.start();
+
+  srcA.start(); srcB.start();
+  AU = {ctx, master, panner, analyser, air, res, rum, toneA, toneB,
+        whine:{o:wo,f:wf,g:wg}, freq:new Uint8Array(analyser.frequencyBinCount)};
+  return AU;
+}
+
+const ramp = (param, v, t) => param.setTargetAtTime(v, AU.ctx.currentTime, t);
+
+// Pushes the current level onto every parameter. Called once per frame — repeated
+// setTargetAtTime calls behave as a one-pole follower, which is exactly the smoothing
+// a motor changing speed should have.
+function pushAudio(){
+  if (!AU) return;
+  const d = S.dev, lv = S.level, T = .03;
+
+  const rpm  = rpmOf(d, lv);
+  const f0   = rpm/60 * d.blades;
+  const cyc  = d.cycle ? S.cycleGain : 1;
+  const aff  = d.cycle ? d.cycle.affects : [];
+  const duck = key => aff.includes(key) ? cyc : 1;
+
+  ramp(AU.air.f.frequency, expLerp(d.air.f[0], d.air.f[1], lv), T);
+  AU.air.f.Q.value = d.air.q;
+  ramp(AU.air.g.gain, d.air.g * curve(lv, d.air.k) * duck("air"), T);
+
+  ramp(AU.res.f.frequency, expLerp(d.res.f[0], d.res.f[1], lv), T);
+  AU.res.f.Q.value = d.res.q;
+  ramp(AU.res.g.gain, d.res.g * curve(lv, d.res.k) * duck("res"), T);
+
+  ramp(AU.rum.f.frequency, expLerp(d.rum.f[0], d.rum.f[1], lv), T);
+  AU.rum.f.Q.value = d.rum.q;
+  ramp(AU.rum.g.gain, d.rum.g * curve(lv, d.rum.k) * duck("rum"), T);
+
+  const tg   = d.tone.g * curve(lv, d.tone.k) * duck("tone");
+  const beat = d.tone.beat || 0;
+  for (let i = 0; i < PARTIALS; i++){
+    const rel = d.tone.harm[i] || 0;
+    const f   = f0 * (i+1);
+    const ok  = rel > 0 && f > 18 && f < 15000;
+    ramp(AU.toneA[i].o.frequency, ok ? f : 40, .05);
+    ramp(AU.toneA[i].g.gain, ok ? tg*rel : 0, T);
+    ramp(AU.toneB[i].o.frequency, ok ? f + beat : 40, .05);
+    ramp(AU.toneB[i].g.gain, ok && beat ? tg*rel*.8 : 0, T);
+  }
+
+  const w = d.whine;
+  if (w){
+    const detune = S.heat ? .92 : 1;   // heating element loads the motor
+    ramp(AU.whine.o.frequency, expLerp(w.f0[0], w.f0[1], Math.max(lv,.01)) * detune, .08);
+    ramp(AU.whine.f.frequency, expLerp(w.lp[0], w.lp[1], lv), T);
+    ramp(AU.whine.g.gain, w.g * curve(lv, w.k), T);
+  } else {
+    ramp(AU.whine.g.gain, 0, T);
+  }
+
+  if (AU.panner) ramp(AU.panner.pan, S.sweep ? Math.sin(S.headPhase) * .55 * lv : 0, .04);
+  ramp(AU.master.gain, S.vol, .05);
+}
+
+// ── canvas ──────────────────────────────────────────────────────────────────
+const stage = document.getElementById("stage");
+const g2 = stage.getContext("2d");
+const W = 1120, H = 660;
+
+function fitCanvas(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  stage.width = W*dpr; stage.height = H*dpr;
+  stage.style.aspectRatio = W + " / " + H;
+  g2.setTransform(dpr,0,0,dpr,0,0);
+}
+fitCanvas();
+addEventListener("resize", fitCanvas);
+
+const MINT = "79,214,192", VIOLET = "139,147,255", WARM = "255,159,67";
+const mint = a => "rgba(" + MINT + "," + a + ")";
+const warm = a => "rgba(" + WARM + "," + a + ")";
+
+function rr(c,x,y,w,h,r){
+  r = Math.min(r, w/2, h/2);
+  c.beginPath();
+  c.moveTo(x+r,y); c.arcTo(x+w,y,x+w,y+h,r); c.arcTo(x+w,y+h,x,y+h,r);
+  c.arcTo(x,y+h,x,y,r); c.arcTo(x,y,x+w,y,r); c.closePath();
+}
+
+// One blade renderer, reused by every device that has a rotor. Trails are drawn
+// behind the true angle rather than instead of it, so at high rpm the exact copy
+// still aliases against the frame rate and the disc appears to stall or run backwards
+// — the same wagon-wheel effect you get filming a real fan.
+function rotor(c, cx, cy, r, blades, angle, lv, opt){
+  opt = opt || {};
+  const hub = opt.hub != null ? opt.hub : r*.17;
+  const cap = opt.maxTrail || Math.max(1, Math.floor(30/blades));
+  const trails = lv > .02 ? Math.min(cap, 1 + Math.round(lv*4)) : 1;
+  const spread = Math.min(.30, lv*.34) / blades * 2;
+
+  for (let t = trails-1; t >= 0; t--){
+    const a = angle - t*spread;
+    const alpha = (opt.alpha || .8) * (t === 0 ? 1 : .16/t);
+    c.save(); c.translate(cx,cy); c.rotate(a);
+    c.fillStyle = mint(alpha*.14); c.strokeStyle = mint(alpha*.7); c.lineWidth = 1.3;
+    for (let b = 0; b < blades; b++){
+      const th = b/blades * Math.PI*2, wdt = Math.PI/blades*.78;
+      c.beginPath();
+      c.moveTo(Math.cos(th)*hub, Math.sin(th)*hub);
+      c.quadraticCurveTo(Math.cos(th+wdt*.6)*r*.62, Math.sin(th+wdt*.6)*r*.62,
+                         Math.cos(th+wdt)*r,        Math.sin(th+wdt)*r);
+      c.quadraticCurveTo(Math.cos(th+wdt*.35)*r*.80, Math.sin(th+wdt*.35)*r*.80,
+                         Math.cos(th-wdt*.15)*hub,  Math.sin(th-wdt*.15)*hub);
+      c.closePath(); c.fill(); c.stroke();
+    }
+    c.restore();
+  }
+  c.strokeStyle = mint(.55); c.lineWidth = 1.3;
+  c.beginPath(); c.arc(cx,cy,hub,0,7); c.stroke();
+  if (opt.grille){
+    c.strokeStyle = mint(.20); c.lineWidth = 1;
+    for (let i = 1; i <= 5; i++){ c.beginPath(); c.arc(cx,cy,r*i/5*1.06,0,7); c.stroke(); }
+    for (let i = 0; i < 28; i++){
+      const th = i/28*Math.PI*2;
+      c.beginPath(); c.moveTo(cx+Math.cos(th)*hub, cy+Math.sin(th)*hub);
+      c.lineTo(cx+Math.cos(th)*r*1.06, cy+Math.sin(th)*r*1.06); c.stroke();
+    }
+    c.strokeStyle = mint(.42); c.lineWidth = 2;
+    c.beginPath(); c.arc(cx,cy,r*1.1,0,7); c.stroke();
+  }
+}
+
+// ── airflow ─────────────────────────────────────────────────────────────────
+// Emitters are described per device: where the air leaves, which way, how wide.
+const EMIT = {
+  fan:    {x:424, y:330, spanY:196, dir:0,          speed:1.00, sweeps:true},
+  tower:  {x:352, y:330, spanY:340, dir:0,          speed:0.86},
+  ac:     {x:462, y:244, spanY:40,  dir:0.30,       speed:0.92, sweeps:true, sweepAmt:.42},
+  dryer:  {x:468, y:314, spanY:32,  dir:-0.10,      speed:1.55},
+  hood:   {x:330, y:452, spanY:180, dir:-Math.PI/2, speed:0.70, vertical:true, life:.58, converge:.38},
+  rack:   {x:496, y:330, spanY:296, dir:0,          speed:1.05},
+  fridge: {x:300, y:546, spanY:56,  dir:0.50,       speed:0.14},
+  cabin:  {x:654, y:100, spanY:150, dir:Math.PI/2,  speed:0.50, vertical:true, life:.75},
+};
+
+const parts = [];
+function emitAir(dt){
+  const e = EMIT[S.dev.render], lv = S.level;
+  if (lv < .02) return;
+  const rate = 210 * lv * e.speed * dt;
+  let n = Math.floor(rate) + (Math.random() < rate % 1 ? 1 : 0);
+  const sweepA = (e.sweeps && S.sweep) ? Math.sin(S.headPhase) * (e.sweepAmt != null ? e.sweepAmt : .40) : 0;
+  while (n-- > 0){
+    const off = (Math.random()*2-1) * e.spanY/2;
+    // an intake pulls inward, so aim each streak back toward the centreline
+    const pull = e.converge ? -(off/(e.spanY/2)) * e.converge : 0;
+    const dir = e.dir + sweepA + pull + (Math.random()*2-1)*.11;
+    const spd = (150 + 460*lv) * e.speed * (.65 + Math.random()*.7);
+    parts.push({
+      x: e.vertical ? e.x + off : e.x,
+      y: e.vertical ? e.y : e.y + off,
+      vx: Math.cos(dir)*spd, vy: Math.sin(dir)*spd,
+      life: 0, max: (.9 + Math.random()*1.5) * (e.life || 1),
+      w: .6 + Math.random()*1.5, seed: Math.random()*99,
+    });
+  }
+}
+
+function stepAir(dt){
+  for (let i = parts.length-1; i >= 0; i--){
+    const p = parts[i];
+    p.life += dt;
+    // turbulence grows downstream, so the jet frays the further it travels
+    const t = p.life / p.max;
+    const turb = 62 * t;
+    p.vy += Math.sin(p.seed + p.life*5.5) * turb * dt;
+    p.vx *= 1 - .55*dt; p.vy *= 1 - .55*dt;
+    p.x += p.vx*dt; p.y += p.vy*dt;
+    if (t >= 1 || p.x < -40 || p.x > W+40 || p.y < -40 || p.y > H+40) parts.splice(i,1);
+  }
+}
+
+function drawAir(c){
+  c.lineCap = "round";
+  for (const p of parts){
+    const t = p.life/p.max;
+    const a = Math.sin(Math.min(1,t*3.2) * Math.PI*.5) * (1-t) * .5;
+    const sp = Math.hypot(p.vx,p.vy) || 1;
+    const len = sp * .035, nx = p.vx/sp, ny = p.vy/sp;
+    c.strokeStyle = S.heat && S.dev.heat ? warm(a) : mint(a);
+    c.lineWidth = p.w;
+    c.beginPath(); c.moveTo(p.x,p.y); c.lineTo(p.x+nx*len, p.y+ny*len); c.stroke();
+  }
+  c.lineCap = "butt";
+}
+
+// ── device drawings ─────────────────────────────────────────────────────────
+const line = (c,a,w) => { c.strokeStyle = mint(a); c.lineWidth = w || 1.3; };
+
+const DRAW = {
+  fan(c, ang, lv){
+    const cx = 330, cy = 330, head = S.sweep ? Math.sin(S.headPhase)*.6 : 0;
+    line(c,.34); c.beginPath();                                  // stand
+    c.moveTo(cx-62,600); c.lineTo(cx+62,600); c.moveTo(cx,600); c.lineTo(cx,452); c.stroke();
+    line(c,.30); rr(c,cx-78,596,156,14,7); c.stroke();
+    c.save();
+    c.translate(cx,cy); c.scale(Math.cos(head)*.30 + .70, 1); c.translate(-cx,-cy);
+    rotor(c, cx, cy, 118, 5, ang, lv, {grille:true});
+    c.restore();
+    line(c,.28); c.beginPath(); c.moveTo(cx-16,448); c.lineTo(cx+16,448); c.lineTo(cx+10,414); c.lineTo(cx-10,414); c.closePath(); c.stroke();
+  },
+
+  tower(c, ang, lv){
+    const x = 250, y = 140, w = 104, h = 400;
+    line(c,.36); rr(c,x,y,w,h,34); c.stroke();
+    line(c,.14); for (let i = 0; i < 26; i++){                   // vent slats
+      const yy = y + 44 + i*(h-96)/26;
+      c.beginPath(); c.moveTo(x+w-10, yy); c.lineTo(x+22, yy+7); c.stroke();
+    }
+    const p = (S.spinAngle*.5) % 1;                              // drum highlight
+    line(c, .30*lv, 3); c.beginPath();
+    c.moveTo(x+w-12, y+44 + p*(h-96)); c.lineTo(x+20, y+51 + p*(h-96)); c.stroke();
+    line(c,.30); rr(c,x+22,y+16,w-44,16,8); c.stroke();          // panel
+    for (let i = 0; i < 3; i++){
+      c.fillStyle = i < (S.on ? S.gear+1 : 0) ? mint(.85) : mint(.16);
+      c.beginPath(); c.arc(x+34+i*18, y+24, 3.2, 0, 7); c.fill();
+    }
+    line(c,.28); rr(c,x-14,y+h-4,w+28,13,6); c.stroke();
+  },
+
+  ac(c, ang, lv){
+    const x = 170, y = 140, w = 320, h = 108;
+    line(c,.38); rr(c,x,y,w,h,18); c.stroke();
+    line(c,.13); for (let i = 0; i < 22; i++){                   // intake grille
+      c.beginPath(); c.moveTo(x+18+i*(w-36)/22, y+14); c.lineTo(x+18+i*(w-36)/22, y+58); c.stroke();
+    }
+    const la = (S.sweep ? Math.sin(S.headPhase)*.45 : .28) * (lv > .02 ? 1 : 0) + .18;
+    for (let i = 0; i < 4; i++){                                 // louvers
+      const yy = y + h - 30 + i*9;
+      line(c,.30 + .2*lv, 3.4); c.beginPath();
+      c.moveTo(x+22, yy); c.lineTo(x+w-22, yy); c.stroke();
+      c.save(); c.translate(x+w-40, yy); line(c,.34,2.6);        // louver tips show the angle
+      c.beginPath(); c.moveTo(0,0); c.lineTo(Math.cos(la)*16, Math.sin(la)*16); c.stroke(); c.restore();
+    }
+    c.fillStyle = S.cycleGain > .5 ? mint(.9) : mint(.18);       // compressor lamp
+    c.beginPath(); c.arc(x+w-26, y+22, 4, 0, 7); c.fill();
+    line(c,.16); c.beginPath();                                  // the wall
+    c.moveTo(60,120); c.lineTo(60,600); c.stroke();
+  },
+
+  dryer(c, ang, lv){
+    c.save(); c.translate(300,330); c.rotate(-.10);
+    line(c,.38); rr(c,-140,-52,250,104,44); c.stroke();          // barrel
+    line(c,.34); c.beginPath();                                  // nozzle
+    c.moveTo(110,-40); c.lineTo(166,-24); c.lineTo(166,24); c.lineTo(110,40); c.stroke();
+    line(c,.34); c.beginPath();                                  // handle
+    c.moveTo(-84,44); c.lineTo(-108,168); c.lineTo(-30,168); c.lineTo(-14,46); c.stroke();
+    rotor(c, -92, 0, 40, 11, ang, lv, {grille:true, alpha:.7});  // intake rotor
+    if (S.heat){                                                 // heating element
+      for (let i = 0; i < 5; i++){
+        c.strokeStyle = warm(.30 + .45*lv*(0.6+0.4*Math.sin(S.spinAngle*3+i)));
+        c.lineWidth = 2.4;
+        c.beginPath(); c.arc(60, -34 + i*17, 9, -1.2, 1.2); c.stroke();
+      }
+    }
+    for (let i = 0; i < 2; i++){                                 // speed switch
+      c.fillStyle = (S.on && S.gear >= i) ? mint(.85) : mint(.16);
+      c.beginPath(); c.arc(-40+i*16, 118, 3.4, 0, 7); c.fill();
+    }
+    c.restore();
+  },
+
+  hood(c, ang, lv){
+    line(c,.38); c.beginPath();                                  // canopy
+    c.moveTo(150,120); c.lineTo(510,120); c.lineTo(452,258); c.lineTo(208,258); c.closePath(); c.stroke();
+    line(c,.14); for (let i = 0; i < 14; i++){                   // baffle filter
+      c.beginPath(); c.moveTo(214+i*17, 254); c.lineTo(238+i*17, 128); c.stroke();
+    }
+    rotor(c, 330, 190, 54, 9, ang, lv, {alpha:.55});             // impeller in the throat
+    line(c,.30); rr(c,296,44,68,78,10); c.stroke();              // duct
+    line(c,.16); c.beginPath();                                  // hob below
+    c.moveTo(160,470); c.lineTo(500,470); c.stroke();
+    for (let i = 0; i < 2; i++){
+      line(c,.20); c.beginPath(); c.arc(250+i*160, 470, 34, Math.PI, 0); c.stroke();
+    }
+  },
+
+  rack(c, ang, lv){
+    const x = 200, y = 130, w = 280, h = 400;
+    line(c,.34); rr(c,x,y,w,h,10); c.stroke();
+    // four fans, each a couple of percent off the others — the beating you hear is visible here
+    const skew = [1, 1.031, .968, 1.014];
+    for (let u = 0; u < 4; u++){
+      const uy = y + 52 + u*92;
+      line(c,.18); rr(c,x+14,uy-36,w-28,72,6); c.stroke();
+      rotor(c, x+66, uy, 30, 7, ang*skew[u] + u*1.3, lv, {alpha:.62, maxTrail:2});
+      rotor(c, x+150, uy, 30, 7, ang*skew[(u+2)%4] - u*.7, lv, {alpha:.62, maxTrail:2});
+      for (let i = 0; i < 3; i++){                               // status LEDs
+        const lit = lv > .02 && ((S.spinAngle*2 + u*3 + i) % 4) < 2.4;
+        c.fillStyle = lit ? mint(.8) : mint(.14);
+        c.beginPath(); c.arc(x+w-34+i*10, uy-18, 2.6, 0, 7); c.fill();
+      }
+    }
+  },
+
+  fridge(c, ang, lv){
+    const x = 230, y = 110, w = 190, h = 440;
+    line(c,.38); rr(c,x,y,w,h,16); c.stroke();
+    line(c,.22); c.beginPath(); c.moveTo(x,y+132); c.lineTo(x+w,y+132); c.stroke();
+    line(c,.30); c.beginPath();                                  // handles
+    c.moveTo(x+w-26,y+34); c.lineTo(x+w-26,y+108); c.moveTo(x+w-26,y+158); c.lineTo(x+w-26,y+268); c.stroke();
+    // the compressor is at the back and it is the only part that makes noise
+    const pulse = lv > .02 ? S.cycleGain : 0;
+    line(c,.20 + .30*pulse, 1.4); rr(c,x+34,y+h-64,72,44,10); c.stroke();
+    c.fillStyle = mint(.06 + .22*pulse); c.fill();
+    for (let i = 0; i < 3; i++){                                 // condenser coil
+      line(c,.12 + .16*pulse); c.beginPath();
+      c.arc(x+w-52, y+h-42, 12+i*9, -Math.PI*.9, Math.PI*.4); c.stroke();
+    }
+    rotor(c, x+w-52, y+h-42, 16, 5, ang, lv*pulse, {alpha:.5});
+    line(c,.14); c.beginPath(); c.moveTo(x-30,y+h+22); c.lineTo(x+w+30,y+h+22); c.stroke();
+  },
+
+  cabin(c, ang, lv){
+    line(c,.30); c.beginPath();                                  // fuselage wall
+    c.moveTo(120,90); c.bezierCurveTo(96,300, 96,380, 130,600); c.stroke();
+    line(c,.36); rr(c,150,150,150,200,68); c.stroke();           // window
+    line(c,.16); rr(c,164,164,122,172,58); c.stroke();
+    c.fillStyle = "rgba(" + VIOLET + ",.05)"; c.fill();
+    line(c,.34); c.beginPath();                                  // wing
+    c.moveTo(300,430); c.lineTo(720,392); c.lineTo(720,414); c.lineTo(300,452); c.closePath(); c.stroke();
+    const ncx = 480, ncy = 520;                                  // engine, slung under the wing
+    line(c,.30); c.beginPath(); c.moveTo(ncx,436); c.lineTo(ncx,466); c.stroke();
+    line(c,.38); rr(c, ncx-84, ncy-56, 168, 112, 52); c.stroke();
+    rotor(c, ncx, ncy, 44, 24, ang, lv, {alpha:.66, hub:12});
+    line(c,.20); c.beginPath(); c.arc(ncx, ncy, 50, 0, 7); c.stroke();
+    // ceiling gaspers, where cabin air actually comes from
+    for (let i = 0; i < 3; i++){
+      line(c,.24); c.beginPath(); c.arc(600+i*54, 86, 9, 0, 7); c.stroke();
+      line(c,.14); c.beginPath(); c.moveTo(600+i*54, 95); c.lineTo(600+i*54, 104); c.stroke();
+    }
+  },
+};
+
+// ── spectrum ────────────────────────────────────────────────────────────────
+const spec = document.getElementById("spec"), gs = spec.getContext("2d");
+function drawSpectrum(){
+  const w = spec.width, h = spec.height;
+  gs.clearRect(0,0,w,h);
+  if (!AU) return;
+  AU.analyser.getByteFrequencyData(AU.freq);
+  const nyq = AU.ctx.sampleRate/2, bins = AU.freq.length, BARS = 60;
+  const lo = 24, hi = 16000;
+  for (let i = 0; i < BARS; i++){
+    const f0 = expLerp(lo,hi,i/BARS), f1 = expLerp(lo,hi,(i+1)/BARS);
+    const b0 = Math.max(0, Math.floor(f0/nyq*bins)), b1 = Math.min(bins-1, Math.ceil(f1/nyq*bins));
+    let m = 0; for (let b = b0; b <= b1; b++) m = Math.max(m, AU.freq[b]);
+    const v = m/255, bw = w/BARS;
+    const bh = Math.max(1.5, v*v*h*.94);
+    gs.fillStyle = S.heat && S.dev.heat ? warm(.22 + v*.62) : mint(.22 + v*.62);
+    gs.fillRect(i*bw+1, h-bh, bw-2, bh);
+  }
+}
+
+// ── interface ───────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const devsEl = $("devs"), gearsEl = $("gears");
+
+DEVICES.forEach((d,i) => {
+  const b = document.createElement("button");
+  b.className = "dev"; b.type = "button"; b.setAttribute("role","option");
+  b.innerHTML = '<span class="idx">' + (i+1) + '</span><span class="nm"><b>' +
+                d.name + '</b><small>' + d.zh + '</small></span>';
+  b.addEventListener("click", () => { selectDevice(i); b.blur(); });
+  devsEl.appendChild(b);
+});
+
+function buildGears(){
+  gearsEl.innerHTML = "";
+  const labels = ["off"].concat(S.dev.gears);
+  labels.forEach((lb,i) => {
+    const b = document.createElement("button");
+    b.className = "gear" + (i === 0 ? " off" : ""); b.type = "button"; b.textContent = lb;
+    b.addEventListener("click", () => { setGear(i-1); b.blur(); });
+    gearsEl.appendChild(b);
+  });
+}
+
+function selectDevice(i){
+  S.dev = DEVICES[i];
+  S.gear = Math.min(S.gear, S.dev.gears.length-1);
+  if (!S.dev.sweep) S.sweep = false;
+  if (!S.dev.heat) S.heat = false;
+  S.cycleOn = true; S.cycleT = 0; S.cycleGain = 1;
+  parts.length = 0;
+  buildGears(); syncUI();
+}
+
+function setGear(i){
+  ensureAudio();
+  if (i < 0) S.on = false;
+  else { S.on = true; S.gear = clamp(i, 0, S.dev.gears.length-1); }
+  syncUI();
+}
+
+function syncUI(){
+  [...devsEl.children].forEach((el,i) =>
+    el.setAttribute("aria-selected", DEVICES[i] === S.dev ? "true" : "false"));
+  [...gearsEl.children].forEach((el,i) =>
+    el.setAttribute("aria-pressed", (S.on ? S.gear+1 : 0) === i ? "true" : "false"));
+
+  $("tOsc").hidden = !S.dev.sweep;
+  $("tOsc").setAttribute("aria-pressed", S.sweep ? "true" : "false");
+  $("dotOsc").className = "dot" + (S.sweep ? " on" : "");
+  $("tHeat").hidden = !S.dev.heat;
+  $("tHeat").setAttribute("aria-pressed", S.heat ? "true" : "false");
+  $("dotHeat").className = "dot" + (S.heat ? " warm" : "");
+  $("pillAux").hidden = !S.dev.cycle;
+  if (S.dev.cycle) $("kAux").textContent = S.dev.cycle.label;
+  $("note").textContent = S.dev.note;
+}
+
+$("tOsc").addEventListener("click", e => { S.sweep = !S.sweep; syncUI(); e.currentTarget.blur(); });
+$("tHeat").addEventListener("click", e => { S.heat = !S.heat; syncUI(); e.currentTarget.blur(); });
+$("vol").addEventListener("input", e => { S.vol = e.target.value/100; });
+
+function ensureAudio(){
+  if (!AU) buildAudio();
+  if (AU.ctx.state === "suspended") AU.ctx.resume();
+  S.started = true;
+  $("tapstart").classList.add("gone");
+}
+$("tapstart").addEventListener("click", () => { ensureAudio(); setGear(0); });
+
+addEventListener("keydown", e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const n = parseInt(e.key, 10);
+  if (n >= 1 && n <= DEVICES.length){ selectDevice(n-1); ensureAudio(); return; }
+  if (e.key === "ArrowUp"){ e.preventDefault(); setGear(S.on ? S.gear+1 : 0); }
+  else if (e.key === "ArrowDown"){ e.preventDefault(); setGear(S.on ? S.gear-1 : -1); }
+  else if (e.key === " "){ e.preventDefault(); ensureAudio(); S.on ? setGear(-1) : setGear(S.gear); }
+  else if (e.key === "o" || e.key === "O"){ if (S.dev.sweep){ S.sweep = !S.sweep; syncUI(); } }
+  else if (e.key === "h" || e.key === "H"){ if (S.dev.heat){ S.heat = !S.heat; syncUI(); } }
+});
+
+// ── loop ────────────────────────────────────────────────────────────────────
+// The simulation runs at a fixed 120 Hz and the renderer takes whatever frame rate
+// it gets. Integrating the raw frame delta instead would make a fan spin up slower
+// on a slow machine, which is exactly the thing the spin-up time is supposed to fix.
+const FIXED = 1/120, MAX_CATCHUP = .25;
+let last = performance.now(), acc = 0, readoutT = 0;
+
+function step(dt){
+  const d = S.dev;
+
+  // one level, asymmetric: a motor is driven up and coasts down
+  const target = S.on ? d.gearLevel[S.gear] : 0;
+  const tau = target > S.level ? d.spin.up : d.spin.down;
+  S.level += (target - S.level) * (1 - Math.exp(-dt/tau));
+  if (S.level < 1e-4 && target === 0) S.level = 0;
+
+  if (d.cycle && S.level > .01){
+    S.cycleT += dt;
+    if (S.cycleT > (S.cycleOn ? d.cycle.on : d.cycle.off)){ S.cycleOn = !S.cycleOn; S.cycleT = 0; }
+    S.cycleGain += ((S.cycleOn ? 1 : 0) - S.cycleGain) * (1 - Math.exp(-dt/d.cycle.ramp));
+  } else { S.cycleGain = 1; }
+
+  S.rotorAngle = (S.rotorAngle + dt * rpmOf(d, S.level)/60 * Math.PI*2) % (Math.PI*2);
+  S.spinAngle += dt * S.level * 2.2;
+  S.headPhase += dt * (S.sweep ? .78 : 0) * Math.max(.25, S.level);
+
+  // placebo thermodynamics
+  const cool = (d.heat && S.heat) ? -6.0 : d.cool;
+  S.temp += ((AMBIENT - cool*S.level) - S.temp) * (1 - Math.exp(-dt/20));
+
+  emitAir(dt); stepAir(dt);
+}
+
+function frame(now){
+  const elapsed = Math.min(MAX_CATCHUP, (now - last)/1000);
+  last = now; acc += elapsed;
+  while (acc >= FIXED){ step(FIXED); acc -= FIXED; }
+
+  const d = S.dev, rpm = rpmOf(d, S.level);
+  pushAudio();
+
+  g2.clearRect(0,0,W,H);
+  drawAir(g2);
+  (DRAW[d.render] || DRAW.fan)(g2, S.rotorAngle, S.level);
+  drawSpectrum();
+
+  readoutT += elapsed;
+  if (readoutT > .12){
+    readoutT = 0;
+    const f0 = rpm/60 * d.blades;
+    const delta = AMBIENT - S.temp;
+    document.body.style.setProperty("--tint", delta >= 0 ? mint(.5) : warm(.42));
+    document.body.style.setProperty("--tintA", String(Math.min(1, Math.abs(delta)/7) * .5));
+    $("bGear").textContent = S.on ? d.gears[S.gear] : "off";
+    $("bRpm").textContent  = Math.round(rpm).toLocaleString();
+    $("bBlade").textContent = f0 > .5 ? f0.toFixed(0) + " Hz" : "—";
+    $("dotRun").className = "dot" + (S.level > .02 ? " on" : "");
+    if (d.cycle){
+      $("bAux").textContent = S.cycleGain > .5 ? "running" : "off";
+      $("dotAux").className = "dot" + (S.cycleGain > .5 ? " on" : "");
+    }
+    $("tempN").textContent = S.temp.toFixed(1);
+    $("rCut").textContent  = Math.round(expLerp(d.air.f[0], d.air.f[1], S.level)) + " Hz";
+    $("rRes").textContent  = Math.round(expLerp(d.res.f[0], d.res.f[1], S.level)) + " Hz \u00b7 Q" + d.res.q;
+    $("rWhine").textContent = d.whine
+      ? Math.round(expLerp(d.whine.f0[0], d.whine.f0[1], Math.max(S.level,.01)) * (S.heat ? .92 : 1)) + " Hz"
+      : "none";
+    $("rUp").textContent   = d.spin.up.toFixed(2) + " s";
+    $("rDown").textContent = d.spin.down.toFixed(2) + " s";
+    const voices = d.tone.harm.filter(x => x > 0).length * (d.tone.beat ? 2 : 1) + 3 + (d.whine ? 1 : 0);
+    $("rVoices").textContent = voices + " \u00b7 " + parts.length + " streaks";
+    $("ctxState").textContent = "audio \u00b7 " + (AU ? AU.ctx.state : "idle");
+  }
+
+  requestAnimationFrame(frame);
+}
+
+buildGears(); syncUI();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
