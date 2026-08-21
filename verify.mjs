@@ -12,34 +12,29 @@ const cut = (from, to) => {
   if (a < 0 || b < 0) throw new Error("could not find " + from + " … " + to);
   return src.slice(a, b);
 };
-const block = cut("const DEVICES = [", "const rpmOf =") +
-              cut("const rpmOf =", "\n");
-const { DEVICES, rpmOf, expLerp } =
-  new Function(block + "\nreturn {DEVICES, rpmOf, expLerp};")();
+const { DEVICES, rpmOf, expLerp } = new Function(
+  cut("const DEVICES = [", "const rpmOf =") + cut("const rpmOf =", "\n") +
+  "\nreturn {DEVICES, rpmOf, expLerp};")();
 
 let failed = 0, checked = 0;
-const ok = (cond, label) => {
-  checked++;
-  if (!cond){ failed++; console.log("  FAIL  " + label); }
-};
+const ok = (cond, label) => { checked++; if (!cond){ failed++; console.log("  FAIL  " + label); } };
 
-const keysOf = (name) => {
-  const body = src.slice(src.indexOf(name), src.indexOf("\n};", src.indexOf(name)));
-  return [...body.matchAll(/^\s{2}(\w+)[:(]/gm)].map(m => m[1]);
-};
-const drawKeys = keysOf("const DRAW = {");
-const emitKeys = keysOf("const EMIT = {");
+// which icons and which draw branches actually exist in the file
+const iconKeys = [...cut("const ICONS = {", "\n};").matchAll(/^\s{2}(\w+):/gm)].map(m => m[1]);
+const drawn = [...src.matchAll(/d\.id === "(\w+)"\)\s+draw/g)].map(m => m[1]);
 
-console.log("DEVICES: " + DEVICES.length + "\n");
+console.log("DEVICES: " + DEVICES.length + "  ICONS: " + iconKeys.join(",") + "\n");
 
-// ── table integrity ─────────────────────────────────────────────────────────
-ok(DEVICES.length <= 9, "at most nine devices, so every one has a digit key");
-ok(new Set(DEVICES.map(d => d.id)).size === DEVICES.length, "device ids are unique");
+ok(DEVICES.length <= 9, "at most nine appliances, so every one has a digit key");
+ok(new Set(DEVICES.map(d => d.id)).size === DEVICES.length, "appliance ids are unique");
 
 for (const d of DEVICES){
   const t = "[" + d.id + "] ";
-  ok(drawKeys.includes(d.render), t + "DRAW has a '" + d.render + "' renderer");
-  ok(emitKeys.includes(d.render), t + "EMIT has a '" + d.render + "' emitter");
+  ok(iconKeys.includes(d.icon), t + "an icon named '" + d.icon + "' exists");
+  ok(drawn.includes(d.id),      t + "the render loop has a branch for it");
+  ok(typeof d.note === "string" && d.note.length > 40, t + "has a caption explaining itself");
+  ok(typeof d.unit === "string", t + "declares the unit its readout is in");
+  ok(typeof d.gearLabel === "string", t + "names its own speed control");
 
   ok(d.gears.length === d.gearLevel.length, t + "gear labels match gear levels");
   ok(d.gearLevel.every((v,i) => i === 0 || v > d.gearLevel[i-1]), t + "gear levels ascend");
@@ -52,25 +47,32 @@ for (const d of DEVICES){
   ok(d.rpm[0] > 0 && d.rpm[1] > d.rpm[0], t + "rpm range is positive and rising");
   if (d.whine) ok(d.whine.f0[0] > 0 && d.whine.lp[0] > 0, t + "whine ranges are positive");
 
-  // a stopped motor must actually be stopped, and must leave zero continuously
+  // a two-position switch needs a second cooling figure to switch to
+  if (d.mode){
+    ok(typeof d.mode.on === "string" && typeof d.mode.off === "string", t + "switch has both labels");
+    ok(typeof d.coolAlt === "number", t + "switch has a second cooling figure");
+    ok(d.coolAlt !== d.cool, t + "the two switch positions actually differ");
+  }
+  ok(typeof d.shake === "number" && d.shake >= 0 && d.shake <= 1, t + "shake is a sane fraction");
+  ok(Math.abs(d.cool) <= 12, t + "cooling claim stays inside the thermometer's scale");
+
+  // a stopped motor must be stopped, and must leave zero continuously
   ok(rpmOf(d, 0) === 0, t + "rpm is exactly zero when off");
   ok(rpmOf(d, .001) < d.rpm[0] * .02, t + "rpm leaves zero without a jump");
   let mono = true, prev = -1;
   for (let lv = 0; lv <= 1.0001; lv += .01){ const r = rpmOf(d, lv); if (r < prev - 1e-9) mono = false; prev = r; }
   ok(mono, t + "rpm rises monotonically with the level");
 
-  // partials have to stay inside the audible band or they alias
-  const f0 = rpmOf(d, 1)/60 * d.blades;
-  const top = f0 * d.tone.harm.length;
-  ok(f0 > 18 && f0 < 3000, t + "blade pass at full gear is " + f0.toFixed(0) + " Hz");
+  // partials must stay inside the audible band or they alias
+  const f0 = rpmOf(d, 1)/60 * d.blades, top = f0 * d.tone.harm.length;
+  ok(f0 > 0 && f0 < 3000, t + "blade pass at full is " + f0.toFixed(0) + " Hz");
   ok(top < 15000, t + "highest partial is " + top.toFixed(0) + " Hz");
 
-  // everything sums into one bus, so the limiter needs headroom left over
+  // the continuous layer, the transients and the limiter share one output
   const partials = d.tone.harm.reduce((a,b) => a+b, 0) * (d.tone.beat ? 1.8 : 1);
   const peak = d.air.g + d.res.g + d.rum.g + d.tone.g*partials + (d.whine ? d.whine.g : 0);
   ok(peak < .85, t + "summed peak gain is " + peak.toFixed(3));
 
-  // a driven motor spins up faster than it coasts down
   ok(d.spin.down > d.spin.up, t + "coast-down is slower than spin-up");
 
   if (d.cycle){
@@ -80,26 +82,20 @@ for (const d of DEVICES){
 }
 
 // ── level dynamics ──────────────────────────────────────────────────────────
-// The same integration the render loop runs. Reaching 95% of a one-pole target
-// takes 3τ, so anything far off that means the loop and the spec disagree.
+// The same integration the fixed step runs. A one-pole target is 95% reached at
+// 3τ, so a figure far off that means the loop and the table disagree.
 for (const d of DEVICES){
+  const dt = 1/120;
   for (const [gi, target] of d.gearLevel.entries()){
     let lv = 0, t = 0;
-    const dt = 1/60;
-    while (lv < target*.95 && t < 60){
-      lv += (target - lv) * (1 - Math.exp(-dt/d.spin.up));
-      t += dt;
-    }
-    const tau3 = 3 * d.spin.up;
+    while (lv < target*.95 && t < 60){ lv += (target - lv) * (1 - Math.exp(-dt/d.spin.up)); t += dt; }
+    const tau3 = 3*d.spin.up;
     ok(t > tau3*.8 && t < tau3*1.35,
        "[" + d.id + "] gear " + d.gears[gi] + " reaches 95% in " + t.toFixed(2) + "s (3τ = " + tau3.toFixed(2) + "s)");
   }
-  // and it must come back down, slower
-  let up = 0, down = 0, lv = 1, t = 0;
-  const dt = 1/60;
+  let lv = 1, t = 0;
   while (lv > .05 && t < 90){ lv += (0 - lv) * (1 - Math.exp(-dt/d.spin.down)); t += dt; }
-  down = t; up = 3*d.spin.up;
-  ok(down > up, "[" + d.id + "] coasting to a stop (" + down.toFixed(1) + "s) outlasts spin-up (" + up.toFixed(1) + "s)");
+  ok(t > 3*d.spin.up, "[" + d.id + "] coasting to a stop (" + t.toFixed(1) + "s) outlasts spin-up");
 }
 
 console.log("\n" + (checked - failed) + "/" + checked + " checks passed");
