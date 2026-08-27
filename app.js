@@ -1311,7 +1311,7 @@ function pick(i){
   S.gear = Math.min(S.gear, S.dev.gears.length-1);
   if (!S.dev.pin) S.pin = false;
   if (!S.dev.mode) S.mode = false;
-  S.cycleOn = true; S.cycleT = 0; S.cycleGain = 1; S.dripT = 0;
+  S.cycleOn = true; S.cycleT = 0; S.cycleGain = 1; S.dripT = 0; S.condense = 0;
   BITS.length = 0; CLOTH.ready = false;
   buildKeys(); sync(); clack(false);
 }
@@ -1813,6 +1813,65 @@ function runSelfTest(){
   });
   ok("every appliance spins up, runs, and coasts to a stop", phys, physWhy);
   tabsOf()[0].click(); keysOf()[0].click();
+
+  // ── the curtain, and remembering it for this session only ────────────────
+  const curtain = document.getElementById("curtain");
+  try { sessionStorage.removeItem(UNLOCK_KEY); } catch (_){}
+  curtain.hidden = false;
+  const wasCalm2 = calm; setCalm(true);          // the calm path hides it synchronously
+  raiseCurtain();
+  ok("the curtain raises and is remembered for the session",
+     curtain.hidden === true && sessionStorage.getItem(UNLOCK_KEY) === "1");
+  ok("the curtain is a real button for the keyboard",
+     curtain.tagName === "BUTTON" && curtain.type === "button");
+  setCalm(wasCalm2);
+
+  // ── status copy stays short and answers the state ────────────────────────
+  tabsOf()[0].click(); keysOf()[0].click();
+  const idle = statusLine();
+  keysOf()[keysOf().length-1].click();
+  S.level = 1; S.spunUp = true;
+  const busy = statusLine();
+  ok("status copy changes with the state and stays short",
+     idle !== busy && idle.length < 42 && busy.length < 42, idle + " / " + busy);
+  ok("the slate names the reel", $("sceneNo").textContent === "Scene 1", $("sceneNo").textContent);
+
+  // ── the inspection stamp fires once, and only at full throttle ───────────
+  try { sessionStorage.removeItem(STAMP_KEY); } catch (_){}
+  S.stamp = -1; S.topGearT = 0;
+  tabsOf()[0].click(); keysOf()[1].click();       // a low gear must never trigger it
+  S.level = DEVICES[0].gearLevel[0];
+  for (let t = 0, dt = 1/120; t < 11; t += dt) step(dt);
+  const lowGearQuiet = S.stamp < 0;
+  keysOf()[keysOf().length-1].click();
+  for (let t = 0, dt = 1/120; t < 11; t += dt) step(dt);
+  const fired = S.stamp >= 0 || sessionStorage.getItem(STAMP_KEY) === "1";
+  ok("the stamp waits for the top setting", lowGearQuiet);
+  ok("the stamp arrives after eight seconds flat out", fired);
+  S.stamp = -1; S.topGearT = 0;
+  for (let t = 0, dt = 1/120; t < 11; t += dt) step(dt);
+  ok("the stamp does not come back in the same session", S.stamp < 0);
+
+  // ── each appliance leaves its own mark ───────────────────────────────────
+  ok("paper reacts differently to each appliance",
+     new Set(DEVICES.map(d => d.paper)).size === DEVICES.length,
+     DEVICES.map(d => d.id + ":" + d.paper).join(" "));
+  tabsOf()[1].click(); keysOf()[keysOf().length-1].click();
+  for (let t = 0, dt = 1/120; t < 8; t += dt) step(dt);
+  const acFogs = S.condense > .05;
+  tabsOf()[0].click(); keysOf()[keysOf().length-1].click();
+  for (let t = 0, dt = 1/120; t < 14; t += dt) step(dt);
+  ok("only the window unit fogs the glass", acFogs && S.condense < .05,
+     "ac " + acFogs + ", fan " + S.condense.toFixed(3));
+  tabsOf()[0].click(); keysOf()[0].click();
+
+  // ── mute reaches the model, not just the label ───────────────────────────
+  const mutedWas = S.muted;
+  document.getElementById("mute").click();
+  ok("mute flips the model and the control together",
+     S.muted !== mutedWas &&
+     document.getElementById("mute").getAttribute("aria-pressed") === String(S.muted));
+  document.getElementById("mute").click();
 
   // ── report ────────────────────────────────────────────────────────────────
   const pass = res.filter(r => r.pass).length;

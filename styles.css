@@ -291,6 +291,7 @@ kbd{display:inline-block; min-width:22px; text-align:center; background:var(--cr
   .group[data-slot="vol"]{justify-self:start}
 }
 @media (max-width:820px){
+  .tabs{grid-template-columns:repeat(2,1fr)}
   .marquee{padding-inline:var(--sp-5); min-height:118px}
   .seal{position:static; translate:0; justify-self:center; width:74px; height:74px;
         margin-top:var(--sp-2); transform:rotate(-5deg)}
@@ -299,7 +300,6 @@ kbd{display:inline-block; min-width:22px; text-align:center; background:var(--cr
   :root{--ctl:48px; --ctl-wide:96px; --icon:24px}
   .tab{min-height:64px}
   body{padding:var(--sp-4) var(--sp-3) var(--sp-5)}
-  .tabs{grid-template-columns:repeat(2,1fr)}
   .plate{grid-template-columns:repeat(2,minmax(0,1fr));
          grid-template-areas:"speed speed" "swing mode" "vol vol" "read read";
          padding:var(--sp-4)}
@@ -307,10 +307,7 @@ kbd{display:inline-block; min-width:22px; text-align:center; background:var(--cr
   /* a fixed grid, so the chip row count cannot depend on label widths */
   .readout{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); align-content:start}
   .readout .chip:last-child{grid-column:1 / -1}
-  .chip{flex:none}
   .chip{flex:1 1 auto; justify-content:center}
-  header{gap:var(--sp-3)}
-  .stamp{align-self:flex-start}
 }
 @media (max-width:380px){
   .tabs{grid-template-columns:1fr}
