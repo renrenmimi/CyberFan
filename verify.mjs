@@ -1,27 +1,21 @@
-// Checks the appliance table and the level dynamics without opening a browser.
-// It reads the real numbers out of index.html rather than a copy, so the two
-// cannot drift apart.  Run:  node verify.mjs
+// Static checks on the appliance table and the maths that reads it. The table is
+// imported, not scraped, so it cannot drift from what the app runs; the coverage
+// checks still read app.js as text, because that is where the drawing lives.
+//   node verify.mjs
 import { readFileSync } from "node:fs";
+import { DEVICES, rpmOf } from "./devices.mjs";
 
-const src = readFileSync(new URL("./index.html", import.meta.url), "utf8");
-
-// The table and the maths that reads it are one contiguous block in the source:
-// everything from the appliance list down to rpmOf.
-const cut = (from, to) => {
-  const a = src.indexOf(from), b = src.indexOf(to, a);
-  if (a < 0 || b < 0) throw new Error("could not find " + from + " … " + to);
-  return src.slice(a, b);
-};
-const { DEVICES, rpmOf, expLerp } = new Function(
-  cut("const DEVICES = [", "const rpmOf =") + cut("const rpmOf =", "\n") +
-  "\nreturn {DEVICES, rpmOf, expLerp};")();
+const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
 
 let failed = 0, checked = 0;
 const ok = (cond, label) => { checked++; if (!cond){ failed++; console.log("  FAIL  " + label); } };
 
 // which icons and which draw branches actually exist in the file
-const iconKeys = [...cut("const ICONS = {", "\n};").matchAll(/^\s{2}(\w+):/gm)].map(m => m[1]);
-const drawn = [...src.matchAll(/d\.id === "(\w+)"\)\s+draw/g)].map(m => m[1]);
+const iconSection = app.slice(app.indexOf("const ICONS = {"), app.indexOf("\n};", app.indexOf("const ICONS = {")));
+const iconKeys = [...iconSection.matchAll(/^\s*(\w+):\s*$/gm)].map(m => m[1]);
+const drawn = [...app.matchAll(/d\.id === "(\w+)"\)\s+draw/g)].map(m => m[1]);
 
 console.log("DEVICES: " + DEVICES.length + "  ICONS: " + iconKeys.join(",") + "\n");
 
