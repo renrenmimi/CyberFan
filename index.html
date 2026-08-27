@@ -11,25 +11,27 @@
 <body>
 <div class="wrap">
 
-  <header>
-    <div>
-      <h1>Cyber<em>Fan</em></h1>
-      <p class="tagline">Four appliances, drawn by hand, wired for sound. The cooling is imaginary.</p>
-    </div>
-    <p class="stamp">dept. of imaginary cooling &middot; est. 1948</p>
+  <header class="marquee">
+    <span class="sunburst" aria-hidden="true"></span>
+    <p class="studio">The Department of Imaginary Cooling presents</p>
+    <h1>Cyber<em>Fan</em><b>!</b></h1>
+    <p class="billing">A cartoon contraption for seriously hot days</p>
+    <p class="seal" aria-label="One hundred percent placebo cooled"><b>100%</b><span>placebo cooled</span></p>
   </header>
 
   <div class="tabs" id="tabs" role="tablist" aria-label="Appliance"></div>
 
   <div class="stage">
+    <p class="slate"><span class="scene" id="sceneNo">Scene 1</span><b id="statusLine">taking a nap</b></p>
     <canvas id="scene" width="1180" height="700" role="img"
             aria-label="A hand-drawn room with a wall clock, calendar and thermometer, and the selected appliance blowing air toward you"></canvas>
     <button class="curtain" id="curtain" type="button">
       <span class="card">
-        <b>Pull to start</b>
-        <span class="say">Nothing makes a sound until you touch the page &mdash; that is the browser's
-          rule, not ours. One click wakes the motor room up.</span>
-        <span class="knob">Start the motor</span>
+        <span class="pre">picture &amp; sound ready</span>
+        <b>Start the show</b>
+        <span class="say">Sound only begins once you interact &mdash; that is the browser's rule,
+          not ours. One press wakes the motor room up.</span>
+        <span class="bigred" aria-hidden="true"><i></i></span>
       </span>
     </button>
   </div>
