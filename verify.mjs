@@ -1,106 +1,98 @@
-// Checks the appliance table and the level dynamics without opening a browser.
-// It reads the real numbers out of index.html rather than a copy, so the two
-// cannot drift apart.  Run:  node verify.mjs
-import { readFileSync } from "node:fs";
+import { readFile, access } from "node:fs/promises";
+import { DEVICES } from "./devices.mjs";
+import { createRoomClock, getRoomDateParts, getRoomTimeParts, localISODate } from "./room-time.mjs";
 
-const src = readFileSync(new URL("./index.html", import.meta.url), "utf8");
+const requiredFiles = [
+  "index.html",
+  "styles.css",
+  "app.js",
+  "devices.mjs",
+  "room-time.mjs",
+  "favicon.svg",
+  "assets/appliance-icons.svg"
+];
 
-// The table and the maths that reads it are one contiguous block in the source:
-// everything from the appliance list down to rpmOf.
-const cut = (from, to) => {
-  const a = src.indexOf(from), b = src.indexOf(to, a);
-  if (a < 0 || b < 0) throw new Error("could not find " + from + " … " + to);
-  return src.slice(a, b);
-};
-const block = cut("const DEVICES = [", "const rpmOf =") +
-              cut("const rpmOf =", "\n");
-const { DEVICES, rpmOf, expLerp } =
-  new Function(block + "\nreturn {DEVICES, rpmOf, expLerp};")();
-
-let failed = 0, checked = 0;
-const ok = (cond, label) => {
-  checked++;
-  if (!cond){ failed++; console.log("  FAIL  " + label); }
+const failures = [];
+const expect = (condition, message) => {
+  if (!condition) failures.push(message);
 };
 
-const keysOf = (name) => {
-  const body = src.slice(src.indexOf(name), src.indexOf("\n};", src.indexOf(name)));
-  return [...body.matchAll(/^\s{2}(\w+)[:(]/gm)].map(m => m[1]);
-};
-const drawKeys = keysOf("const DRAW = {");
-const emitKeys = keysOf("const EMIT = {");
-
-console.log("DEVICES: " + DEVICES.length + "\n");
-
-// ── table integrity ─────────────────────────────────────────────────────────
-ok(DEVICES.length <= 9, "at most nine devices, so every one has a digit key");
-ok(new Set(DEVICES.map(d => d.id)).size === DEVICES.length, "device ids are unique");
-
-for (const d of DEVICES){
-  const t = "[" + d.id + "] ";
-  ok(drawKeys.includes(d.render), t + "DRAW has a '" + d.render + "' renderer");
-  ok(emitKeys.includes(d.render), t + "EMIT has a '" + d.render + "' emitter");
-
-  ok(d.gears.length === d.gearLevel.length, t + "gear labels match gear levels");
-  ok(d.gearLevel.every((v,i) => i === 0 || v > d.gearLevel[i-1]), t + "gear levels ascend");
-  ok(d.gearLevel.at(-1) === 1, t + "top gear is full throttle");
-  ok(d.gearLevel[0] > 0, t + "lowest gear is above zero");
-
-  // expLerp divides by its first endpoint, so nothing may start at zero
-  for (const [k, path] of Object.entries({air:d.air, res:d.res, rum:d.rum}))
-    ok(path.f[0] > 0 && path.f[1] > path.f[0], t + k + " sweep is positive and rising");
-  ok(d.rpm[0] > 0 && d.rpm[1] > d.rpm[0], t + "rpm range is positive and rising");
-  if (d.whine) ok(d.whine.f0[0] > 0 && d.whine.lp[0] > 0, t + "whine ranges are positive");
-
-  // a stopped motor must actually be stopped, and must leave zero continuously
-  ok(rpmOf(d, 0) === 0, t + "rpm is exactly zero when off");
-  ok(rpmOf(d, .001) < d.rpm[0] * .02, t + "rpm leaves zero without a jump");
-  let mono = true, prev = -1;
-  for (let lv = 0; lv <= 1.0001; lv += .01){ const r = rpmOf(d, lv); if (r < prev - 1e-9) mono = false; prev = r; }
-  ok(mono, t + "rpm rises monotonically with the level");
-
-  // partials have to stay inside the audible band or they alias
-  const f0 = rpmOf(d, 1)/60 * d.blades;
-  const top = f0 * d.tone.harm.length;
-  ok(f0 > 18 && f0 < 3000, t + "blade pass at full gear is " + f0.toFixed(0) + " Hz");
-  ok(top < 15000, t + "highest partial is " + top.toFixed(0) + " Hz");
-
-  // everything sums into one bus, so the limiter needs headroom left over
-  const partials = d.tone.harm.reduce((a,b) => a+b, 0) * (d.tone.beat ? 1.8 : 1);
-  const peak = d.air.g + d.res.g + d.rum.g + d.tone.g*partials + (d.whine ? d.whine.g : 0);
-  ok(peak < .85, t + "summed peak gain is " + peak.toFixed(3));
-
-  // a driven motor spins up faster than it coasts down
-  ok(d.spin.down > d.spin.up, t + "coast-down is slower than spin-up");
-
-  if (d.cycle){
-    ok(d.cycle.ramp * 2 < Math.min(d.cycle.on, d.cycle.off), t + "cycle ramp fits inside both phases");
-    ok(d.cycle.affects.every(k => ["air","res","rum","tone"].includes(k)), t + "cycle targets real paths");
+await Promise.all(requiredFiles.map(async (file) => {
+  try {
+    await access(new URL(file, import.meta.url));
+  } catch {
+    failures.push(`Missing required file: ${file}`);
   }
+}));
+
+const [html, css, js, icons] = await Promise.all([
+  readFile(new URL("index.html", import.meta.url), "utf8"),
+  readFile(new URL("styles.css", import.meta.url), "utf8"),
+  readFile(new URL("app.js", import.meta.url), "utf8"),
+  readFile(new URL("assets/appliance-icons.svg", import.meta.url), "utf8")
+]);
+
+expect(DEVICES.length === 4, "CyberFan must have exactly four appliances.");
+expect(new Set(DEVICES.map(({ id }) => id)).size === DEVICES.length, "Appliance ids must be unique.");
+expect(DEVICES.map(({ key }) => key).join("") === "1234", "Appliance shortcuts must be 1–4.");
+
+const sampleDate = new Date(2026, 7, 27, 15, 4, 5, 250);
+const dateParts = getRoomDateParts(sampleDate, "en-US");
+const timeParts = getRoomTimeParts(sampleDate, "en-US");
+expect(localISODate(sampleDate) === "2026-08-27", "Calendar must produce the visitor's local ISO date.");
+expect(dateParts.day === "27" && dateParts.month === "AUG" && dateParts.year === "2026", "Calendar parts are incorrect.");
+expect(timeParts.hour === "15" && timeParts.minute === "04" && timeParts.second === "05", "Clock parts are incorrect.");
+
+let scheduledTask = null;
+let cancelledTimer = null;
+let renderCount = 0;
+const testClock = createRoomClock(() => { renderCount += 1; }, {
+  now: () => sampleDate,
+  schedule: (callback, delay) => {
+    scheduledTask = { callback, delay };
+    return 17;
+  },
+  cancel: (timer) => { cancelledTimer = timer; }
+});
+testClock.start();
+expect(testClock.running && renderCount === 1, "Clock must render immediately when started.");
+expect(scheduledTask?.delay === 750, "Clock must schedule its next update on the next second boundary.");
+scheduledTask?.callback();
+expect(renderCount === 2, "Clock must update on its scheduled tick.");
+testClock.stop();
+expect(!testClock.running && cancelledTimer === 17, "Clock cleanup must cancel its active timer.");
+
+for (const device of DEVICES) {
+  expect(device.gears?.length === 3, `${device.id} must have three mechanical speeds.`);
+  expect(device.renderer, `${device.id} needs a canvas renderer.`);
+  expect(device.palette?.main && device.palette?.trim, `${device.id} needs a cartoon palette.`);
+  expect(device.sound?.cutoff?.length === 2, `${device.id} needs Web Audio filter bounds.`);
+  expect(icons.includes(`id="${device.icon}"`), `Missing SVG symbol for ${device.id}.`);
 }
 
-// ── level dynamics ──────────────────────────────────────────────────────────
-// The same integration the render loop runs. Reaching 95% of a one-pole target
-// takes 3τ, so anything far off that means the loop and the spec disagree.
-for (const d of DEVICES){
-  for (const [gi, target] of d.gearLevel.entries()){
-    let lv = 0, t = 0;
-    const dt = 1/60;
-    while (lv < target*.95 && t < 60){
-      lv += (target - lv) * (1 - Math.exp(-dt/d.spin.up));
-      t += dt;
-    }
-    const tau3 = 3 * d.spin.up;
-    ok(t > tau3*.8 && t < tau3*1.35,
-       "[" + d.id + "] gear " + d.gears[gi] + " reaches 95% in " + t.toFixed(2) + "s (3τ = " + tau3.toFixed(2) + "s)");
-  }
-  // and it must come back down, slower
-  let up = 0, down = 0, lv = 1, t = 0;
-  const dt = 1/60;
-  while (lv > .05 && t < 90){ lv += (0 - lv) * (1 - Math.exp(-dt/d.spin.down)); t += dt; }
-  down = t; up = 3*d.spin.up;
-  ok(down > up, "[" + d.id + "] coasting to a stop (" + down.toFixed(1) + "s) outlasts spin-up (" + up.toFixed(1) + "s)");
+for (const reference of ["styles.css", "app.js", "favicon.svg"]) {
+  expect(html.includes(reference), `index.html must reference ${reference}.`);
 }
 
-console.log("\n" + (checked - failed) + "/" + checked + " checks passed");
-process.exit(failed ? 1 : 0);
+expect(js.includes("AudioContext"), "Web Audio API setup is missing.");
+expect(js.includes("requestAnimationFrame"), "Animation loop must use requestAnimationFrame.");
+expect(js.includes("Math.min(1 / 120, remaining)"), "Simulation timestep must be bounded.");
+expect(js.includes("window.addEventListener(\"keydown\""), "Keyboard operation is missing.");
+expect(js.includes("pagehide") && js.includes("roomClock.stop()"), "Clock timer cleanup hook is missing.");
+expect(js.includes("reducedMotionQuery"), "Canvas reduced-motion handling is missing.");
+expect(html.includes("wallCalendar") && html.includes("wallClock"), "Room calendar or clock markup is missing.");
+expect(html.includes("aria-live=\"polite\""), "Live appliance state announcement is missing.");
+expect(html.includes("muteButton"), "Obvious sound mute control is missing.");
+expect(css.includes("prefers-reduced-motion"), "Reduced-motion fallback is missing.");
+expect(css.includes(".frost-vignette"), "Cartoon frost vignette is missing.");
+expect(css.includes("--control-height") && css.includes("--touch-target"), "Shared control sizing tokens are missing.");
+expect(css.includes("button:focus-visible"), "Keyboard focus styles are missing.");
+expect(css.includes("@media (max-width: 520px)"), "Mobile layout breakpoint is missing.");
+
+if (failures.length) {
+  console.error(`CyberFan self-check failed (${failures.length}):`);
+  for (const failure of failures) console.error(`- ${failure}`);
+  process.exitCode = 1;
+} else {
+  console.log(`CyberFan self-check passed: ${DEVICES.length} appliances, ${requiredFiles.length} required files, local time lifecycle, keyboard, responsive, motion, and audio hooks present.`);
+}

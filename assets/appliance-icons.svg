@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg">
+  <symbol id="fan" viewBox="0 0 100 100">
+    <g fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="50" cy="38" r="27" fill="#e8f1df"/>
+      <path fill="#73b5bd" d="M50 37C62 17 76 23 69 36c-4 7-11 8-19 5zM49 39C31 29 24 43 36 50c7 4 13 0 18-7zM52 40c5 20-10 24-15 10-2-7 3-12 10-15z"/>
+      <circle cx="50" cy="38" r="5" fill="#e24e40"/>
+      <path d="M50 65v18M34 87h32"/>
+    </g>
+  </symbol>
+  <symbol id="ac" viewBox="0 0 100 100">
+    <g fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="11" y="22" width="78" height="55" rx="11" fill="#e4d2a9"/>
+      <path d="M22 36h40M22 46h40M22 56h40M70 35h7M70 47h7"/>
+      <path stroke="#70aeb8" d="M26 66c7 5 13 5 20 0s13-5 20 0"/>
+      <path stroke="#70aeb8" d="M28 83c4-6 8-6 12 0M50 83c4-6 8-6 12 0M72 83c4-6 8-6 12 0"/>
+    </g>
+  </symbol>
+  <symbol id="dryer" viewBox="0 0 100 100">
+    <g fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+      <path fill="#db6659" d="M15 30c0-9 8-16 17-16h27c9 0 16 7 16 16v3l16 8v17l-16 8v2c0 9-7 16-16 16H32c-9 0-17-7-17-16z"/>
+      <circle cx="31" cy="49" r="13" fill="#f6dfb8"/>
+      <path fill="#f0c45d" d="M43 77h20l8 14H38z"/>
+      <path stroke="#f0c45d" d="M81 46h10M81 55h10"/>
+    </g>
+  </symbol>
+  <symbol id="handfan" viewBox="0 0 100 100">
+    <g fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+      <path fill="#7da66d" d="M50 72C12 55 9 23 31 12c14-7 31 5 23 24 9-20 30-20 38-5 12 23-9 42-42 41z"/>
+      <path stroke="#e2bd61" d="M50 70 30 21M51 70l4-44M52 70l28-34"/>
+      <path fill="#d99a4e" d="m48 68 9 2-7 23-11-3z"/>
+    </g>
+  </symbol>
+</svg>
