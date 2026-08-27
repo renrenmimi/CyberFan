@@ -71,12 +71,12 @@
   header{display:flex; align-items:flex-end; justify-content:space-between;
          gap:var(--sp-4) var(--sp-5); flex-wrap:wrap}
   h1{
-    margin:0; font-size:clamp(30px,4.6vw,46px); line-height:.95; letter-spacing:-.01em;
+    margin:0; font-size:clamp(30px,4.6vw,46px); line-height:1.06; letter-spacing:-.01em;
     color:var(--red); text-shadow:3px 3px 0 var(--cream), 5px 5px 0 var(--ink);
     transform:rotate(-1.2deg); transform-origin:left bottom;
   }
   h1 em{font-style:normal; color:var(--blue-dk)}
-  .tagline{margin-top:var(--sp-2); font-size:var(--fs-body); color:var(--ink-2); max-width:52ch}
+  .tagline{margin-top:var(--sp-3); font-size:var(--fs-body); color:var(--ink-2); max-width:52ch}
   .stamp{
     align-self:flex-end; border:var(--bw) solid var(--ink); border-radius:var(--r-sm);
     padding:var(--sp-1) var(--sp-3); font-size:var(--fs-micro); letter-spacing:var(--track-caps);
@@ -658,7 +658,7 @@ function relayout(portrait){
     WALL.thermo = {x:42,  y:56,  w:100, h:252};
     WALL.clock  = {cx:380, cy:158, r:72};
     WALL.cal    = {x:600, y:56,  w:120, h:150};
-    WALL.tag    = {x:196, y:WALL.rail};
+    WALL.tag    = {x:146, y:WALL.rail};
     FAN.bx = 380;  FAN.hy = FLOOR - 300; FAN.cage = 92;
     AC.x = 176; AC.y = 352; AC.w = 408; AC.h = 190;
     DRY.cx = 392; DRY.cy = 500;
