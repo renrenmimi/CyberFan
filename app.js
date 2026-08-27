@@ -1,954 +1,1892 @@
-import { DEVICES, AMBIENT_TEMPERATURE, FREEZE_TEMPERATURE } from "./devices.mjs";
-import { createRoomClock, getRoomDateParts, getRoomTimeParts } from "./room-time.mjs";
+// CyberFan — a hand-drawn cooling department.
+// Canvas 2D for the room, Web Audio for every sound. No dependencies, no build.
+import { DEVICES, PARTIALS, AMBIENT,
+         clamp, lerp, expLerp, curve, rpmOf } from "./devices.mjs";
+import { FMT, CLOCK, refreshDate, startClock, stopClock } from "./room-time.mjs";
 
-const $ = (selector) => document.querySelector(selector);
-const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
-const lerp = (a, b, t) => a + (b - a) * t;
-const approach = (value, target, tau, dt) => value + (target - value) * (1 - Math.exp(-dt / tau));
-
-const ui = {
-  applianceTabs: $("#applianceTabs"), sceneCanvas: $("#sceneCanvas"), soundMeter: $("#soundMeter"),
-  cartoonStage: $("#cartoonStage"), startCurtain: $("#startCurtain"), sceneNumber: $("#sceneNumber"),
-  machineStatus: $("#machineStatus"), applianceName: $("#applianceName"), applianceChinese: $("#applianceChinese"),
-  applianceCaption: $("#applianceCaption"), powerButton: $("#powerButton"), gearButtons: $("#gearButtons"),
-  modeButton: $("#modeButton"), modeLabel: $("#modeLabel"), modeHint: $("#modeHint"),
-  volumeRange: $("#volumeRange"), volumeOutput: $("#volumeOutput"), temperatureValue: $("#temperatureValue"),
-  temperatureMood: $("#temperatureMood"), mercury: $("#mercury"), thermometerWrap: $("#thermometerWrap"),
-  chillFill: $("#chillFill"), chillScore: $("#chillScore"), frostVignette: $("#frostVignette"),
-  windReadout: $("#windReadout"), rpmReadout: $("#rpmReadout"), modeReadout: $("#modeReadout"),
-  speedOutput: $("#speedOutput"), muteButton: $("#muteButton"), wallCalendar: $("#wallCalendar"),
-  calendarWeekday: $("#calendarWeekday"), calendarDay: $("#calendarDay"), calendarMonth: $("#calendarMonth"),
-  calendarYear: $("#calendarYear"), wallClock: $("#wallClock"), clockHour: $("#clockHour"),
-  clockMinute: $("#clockMinute"), clockSecond: $("#clockSecond"), humidityValue: $("#humidityValue"),
-  windDirection: $("#windDirection")
+// ── the paint box ───────────────────────────────────────────────────────────
+// Cel colours, kept in one place so nothing is hard-coded further down.
+const C = {
+  paper:"#f1e1be", paper2:"#e0c795", paper3:"#cfae76",
+  ink:"#241a12",   ink2:"#4a3626",
+  cream:"#f9f2df", bone:"#ebdfc2", white:"#fffdf5",
+  red:"#c4402e",   redDk:"#962c1f", redLt:"#e0705c",
+  blue:"#7cb4c6",  blueLt:"#c9e6ee", blueDk:"#4a8798",
+  mustard:"#e4ae3a", mustardDk:"#b8842a",
+  sage:"#90a96d",  brown:"#8a5f3c", brownDk:"#5f4028",
+  hot:"#e2603c",   ember:"#f5a63c",
 };
 
-const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+// ── helpers ─────────────────────────────────────────────────────────────────
+const ease = t => t*t*(3-2*t);
 
-const state = {
-  deviceIndex: 0,
-  powered: false,
-  unlocked: false,
-  muted: false,
-  reducedMotion: reducedMotionQuery.matches,
-  gearIndex: 0,
-  target: 0,
-  level: 0,
-  actionLevel: 0,
-  rpm: 0,
-  rotorAngle: 0,
-  flapPhase: 0,
-  headPhase: 0,
-  mode: false,
-  compressorOn: true,
-  compressorClock: 0,
-  compressorMix: 1,
-  manualBurst: 0,
-  pointerAim: 0,
-  temperature: AMBIENT_TEMPERATURE,
-  particles: [],
-  particleCarry: 0,
-  audioClock: 0,
-  lastFrame: performance.now()
+// cheap deterministic value noise, used for the shake and for boiling the ink line
+const hash = n => { const s = Math.sin(n*127.1+311.7)*43758.5453; return s - Math.floor(s); };
+const vnoise = t => {
+  const i = Math.floor(t), f = t-i;
+  return lerp(hash(i), hash(i+1), ease(f))*2 - 1;
 };
 
-reducedMotionQuery.addEventListener("change", (event) => {
-  state.reducedMotion = event.matches;
-  if (event.matches) state.particles.length = 0;
-});
+// ── state ───────────────────────────────────────────────────────────────────
+const S = {
+  dev: DEVICES[0],
+  gear: 0, on: false, level: 0,
+  pin: false, mode: false, vol: .70, muted: false, spunUp: false,
+  rotorAngle: 0, headPhase: 0, wobbleT: 0, drawFrame: 0,
+  cycleOn: true, cycleT: 0, cycleGain: 1,
+  swingPhase: 0, swingSign: 1, handBoost: 0, handX: 566, pointer: {x:0, y:0, inside:false},
+  dripT: 0, ringT: 0, flyT: 0, dustT: 0, camKick: 0, condense: 0, topGearT: 0, stamp: -1,
+  temp: AMBIENT, humid: .72, frost: 0, started: false,
+};
 
-const scene = ui.sceneCanvas.getContext("2d");
-const meter = ui.soundMeter.getContext("2d");
-const grain = Array.from({ length: 260 }, (_, i) => ({
-  x: (i * 137.508) % 960,
-  y: (i * 73.721) % 600,
-  r: .35 + (i % 4) * .18,
-  a: .025 + (i % 5) * .008
-}));
+// ── audio ───────────────────────────────────────────────────────────────────
+// Built once on the first gesture and never rebuilt, so switching appliances lets
+// one motor coast down while the next spins up instead of clicking.
+let AU = null;
 
-class CartoonAudio {
-  constructor() {
-    this.ctx = null;
-    this.master = null;
-    this.panner = null;
-    this.analyser = null;
-    this.nodes = null;
-    this.waveform = new Uint8Array(512);
+function noiseBuffer(ctx, seconds){
+  const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate*seconds), ctx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random()*2 - 1;
+  return buf;
+}
+
+function buildAudio(){
+  const Ctor = window.AudioContext || window.webkitAudioContext;
+  if (!Ctor) return null;
+  const ctx = new Ctor();
+
+  const limiter = ctx.createDynamicsCompressor();
+  limiter.threshold.value = -8; limiter.knee.value = 6;
+  limiter.ratio.value = 12; limiter.attack.value = .004; limiter.release.value = .18;
+
+  const master = ctx.createGain(); master.gain.value = S.vol;
+  master.connect(limiter); limiter.connect(ctx.destination);
+
+  const panner = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+  const bus = ctx.createGain(); bus.gain.value = 1;      // the continuous motor layer
+  bus.connect(panner || master);
+  if (panner) panner.connect(master);
+
+  const shot = ctx.createGain(); shot.gain.value = 1;    // clicks, whooshes, drips
+  shot.connect(master);
+
+  const srcA = ctx.createBufferSource(); srcA.buffer = noiseBuffer(ctx,3); srcA.loop = true;
+  const srcB = ctx.createBufferSource(); srcB.buffer = noiseBuffer(ctx,3); srcB.loop = true;
+  const hp = ctx.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 55;
+  srcA.connect(hp);
+
+  const path = (type, from, q) => {
+    const f = ctx.createBiquadFilter(); f.type = type; f.Q.value = q;
+    const g = ctx.createGain(); g.gain.value = 0;
+    from.connect(f); f.connect(g); g.connect(bus);
+    return {f,g};
+  };
+  const air = path("lowpass",  hp,   .7);
+  const res = path("bandpass", hp,  2.0);
+  const rum = path("lowpass",  srcB, 1.2);
+
+  const bank = () => Array.from({length: PARTIALS}, () => {
+    const o = ctx.createOscillator(); o.type = "sine";
+    const g = ctx.createGain(); g.gain.value = 0;
+    o.connect(g); g.connect(bus); o.start();
+    return {o,g};
+  });
+  const toneA = bank(), toneB = bank();
+
+  const wo = ctx.createOscillator(); wo.type = "sawtooth";
+  const wf = ctx.createBiquadFilter(); wf.type = "lowpass"; wf.Q.value = .9;
+  const wg = ctx.createGain(); wg.gain.value = 0;
+  wo.connect(wf); wf.connect(wg); wg.connect(bus); wo.start();
+
+  srcA.start(); srcB.start();
+  return {ctx, master, shot, panner, bus, air, res, rum, toneA, toneB,
+          whine:{o:wo,f:wf,g:wg}, burst: noiseBuffer(ctx, 1)};
+}
+
+const ramp = (p, v, t) => { if (Number.isFinite(v)) p.setTargetAtTime(v, AU.ctx.currentTime, t); };
+
+// A short noise voice, used for every transient in the piece.
+function shotNoise(dur, filterType, f0, f1, q, peak, delay){
+  if (!AU) return;
+  const t0 = AU.ctx.currentTime + (delay || 0);
+  const src = AU.ctx.createBufferSource(); src.buffer = AU.burst;
+  src.playbackRate.value = .9 + Math.random()*.25;
+  const f = AU.ctx.createBiquadFilter(); f.type = filterType; f.Q.value = q;
+  f.frequency.setValueAtTime(f0, t0);
+  f.frequency.exponentialRampToValueAtTime(f1, t0 + dur*.55);
+  f.frequency.exponentialRampToValueAtTime(f0*.85, t0 + dur);
+  const g = AU.ctx.createGain();
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(peak, t0 + dur*.16);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  src.connect(f); f.connect(g); g.connect(AU.shot);
+  src.start(t0); src.stop(t0 + dur + .02);
+}
+
+function tick(freq, dur, peak, type){
+  if (!AU) return;
+  const t0 = AU.ctx.currentTime;
+  const o = AU.ctx.createOscillator(); o.type = type || "triangle";
+  o.frequency.setValueAtTime(freq, t0);
+  o.frequency.exponentialRampToValueAtTime(freq*.45, t0 + dur);
+  const g = AU.ctx.createGain();
+  g.gain.setValueAtTime(peak, t0);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  o.connect(g); g.connect(AU.shot);
+  o.start(t0); o.stop(t0 + dur + .02);
+}
+
+// the clack of a mechanical key: a wooden body plus the spring behind it
+const clack = (hard) => { shotNoise(.055, "bandpass", 2400, 3400, 1.1, hard ? .30 : .18, 0);
+                          tick(hard ? 940 : 1180, .045, hard ? .16 : .09); };
+const whoosh = (strength) => shotNoise(.42*(0.8+0.4*strength), "bandpass",
+                                       240 + 90*strength, 900 + 900*strength, .9, .11 + .17*strength, 0);
+const drip = () => { tick(1500, .09, .07, "sine"); tick(620, .16, .05, "sine"); };
+
+// Pushes the current level onto every parameter, once per frame. Repeated
+// setTargetAtTime calls behave as a one-pole follower, which is the smoothing a
+// motor changing speed already has.
+function pushAudio(){
+  if (!AU) return;
+  const d = S.dev, lv = clamp(effLevel(), 0, 1), T = .03;
+  const rpm = rpmOf(d, lv), f0 = rpm/60 * d.blades;
+  const cyc = d.cycle ? S.cycleGain : 1;
+  const duck = key => (d.cycle && d.cycle.affects.includes(key)) ? cyc : 1;
+
+  ramp(AU.air.f.frequency, expLerp(d.air.f[0], d.air.f[1], lv), T);
+  AU.air.f.Q.value = d.air.q;
+  ramp(AU.air.g.gain, d.air.g * curve(lv, d.air.k) * duck("air"), T);
+
+  ramp(AU.res.f.frequency, expLerp(d.res.f[0], d.res.f[1], lv), T);
+  AU.res.f.Q.value = d.res.q;
+  ramp(AU.res.g.gain, d.res.g * curve(lv, d.res.k) * duck("res"), T);
+
+  ramp(AU.rum.f.frequency, expLerp(d.rum.f[0], d.rum.f[1], lv), T);
+  AU.rum.f.Q.value = d.rum.q;
+  ramp(AU.rum.g.gain, d.rum.g * curve(lv, d.rum.k) * duck("rum"), T);
+
+  const tg = d.tone.g * curve(lv, d.tone.k) * duck("tone"), beat = d.tone.beat || 0;
+  for (let i = 0; i < PARTIALS; i++){
+    const rel = d.tone.harm[i] || 0, f = f0 * (i+1);
+    const live = rel > 0 && f > 18 && f < 15000;
+    ramp(AU.toneA[i].o.frequency, live ? f : 40, .05);
+    ramp(AU.toneA[i].g.gain, live ? tg*rel : 0, T);
+    ramp(AU.toneB[i].o.frequency, live ? f + beat : 40, .05);
+    ramp(AU.toneB[i].g.gain, live && beat ? tg*rel*.8 : 0, T);
   }
 
-  makeNoise(seconds, brown = false) {
-    const length = Math.floor(this.ctx.sampleRate * seconds);
-    const buffer = this.ctx.createBuffer(1, length, this.ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    let previous = 0;
-    for (let i = 0; i < length; i++) {
-      const white = Math.random() * 2 - 1;
-      previous = (previous + .021 * white) / 1.021;
-      data[i] = brown ? previous * 3.2 : white;
-    }
-    return buffer;
+  if (d.whine){
+    const load = S.mode ? .92 : 1;                       // the heater drags the motor down
+    ramp(AU.whine.o.frequency, expLerp(d.whine.f0[0], d.whine.f0[1], Math.max(lv,.01)) * load, .08);
+    ramp(AU.whine.f.frequency, expLerp(d.whine.lp[0], d.whine.lp[1], lv), T);
+    ramp(AU.whine.g.gain, d.whine.g * curve(lv, d.whine.k), T);
+  } else {
+    ramp(AU.whine.g.gain, 0, T);
   }
 
-  build() {
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    if (!AudioCtx) throw new Error("Web Audio is not supported in this browser");
-    this.ctx = new AudioCtx();
-    const ctx = this.ctx;
+  if (AU.panner) ramp(AU.panner.pan, S.pin && d.pin ? Math.sin(S.headPhase)*.55*lv : 0, .04);
+  ramp(AU.master.gain, S.muted ? 0 : S.vol, .05);
+}
 
-    const limiter = ctx.createDynamicsCompressor();
-    limiter.threshold.value = -13;
-    limiter.knee.value = 8;
-    limiter.ratio.value = 9;
-    limiter.attack.value = .005;
-    limiter.release.value = .2;
-    this.analyser = ctx.createAnalyser();
-    this.analyser.fftSize = 1024;
-    this.analyser.smoothingTimeConstant = .78;
-    this.waveform = new Uint8Array(this.analyser.fftSize);
-    this.master = ctx.createGain();
-    this.master.gain.value = Number(ui.volumeRange.value) / 100;
-    this.panner = ctx.createStereoPanner ? ctx.createStereoPanner() : ctx.createGain();
-    const bus = ctx.createGain();
-    bus.gain.value = .72;
-    bus.connect(this.panner);
-    this.panner.connect(this.master);
-    this.master.connect(limiter);
-    limiter.connect(this.analyser);
-    this.analyser.connect(ctx.destination);
+// ── canvas ──────────────────────────────────────────────────────────────────
+const cv = document.getElementById("scene");
+const g = cv.getContext("2d");
 
-    const airSource = ctx.createBufferSource();
-    airSource.buffer = this.makeNoise(3.1);
-    airSource.loop = true;
-    const airHigh = ctx.createBiquadFilter();
-    airHigh.type = "highpass";
-    airHigh.frequency.value = 75;
-    const airLow = ctx.createBiquadFilter();
-    airLow.type = "lowpass";
-    airLow.Q.value = .65;
-    const airGain = ctx.createGain();
-    airGain.gain.value = 0;
-    airSource.connect(airHigh).connect(airLow).connect(airGain).connect(bus);
+// Scene geometry is computed, never typed in. The narrow layout is a portrait
+// framing of the same room with its own furniture positions — not the landscape
+// composition scaled down, which is what a 328x199 letterbox looked like.
+let W = 1180, H = 700, FLOOR = 592, REACH = 640;
+const FAN = {}, AC = {}, DRY = {}, HAND = {}, WALL = {};
+let portraitScene = false;
 
-    const rumbleSource = ctx.createBufferSource();
-    rumbleSource.buffer = this.makeNoise(3.7, true);
-    rumbleSource.loop = true;
-    const rumbleLow = ctx.createBiquadFilter();
-    rumbleLow.type = "lowpass";
-    rumbleLow.frequency.value = 115;
-    rumbleLow.Q.value = 1.2;
-    const rumbleGain = ctx.createGain();
-    rumbleGain.gain.value = 0;
-    rumbleSource.connect(rumbleLow).connect(rumbleGain).connect(bus);
+function relayout(portrait){
+  portraitScene = portrait;
+  W = portrait ? 760 : 1180;
+  H = portrait ? 980 : 700;
+  FLOOR = Math.round(H * (portrait ? .80 : .846));
+  REACH = Math.round(Math.hypot(W, H) * .47);
+  WALL.rail = portrait ? Math.round(H*.30) : 96;
 
-    const motor = ctx.createOscillator();
-    motor.type = "sine";
-    const motorGain = ctx.createGain();
-    motorGain.gain.value = 0;
-    motor.connect(motorGain).connect(bus);
-
-    const bladeTone = ctx.createOscillator();
-    bladeTone.type = "triangle";
-    const bladeGain = ctx.createGain();
-    bladeGain.gain.value = 0;
-    bladeTone.connect(bladeGain).connect(bus);
-
-    const compressor = ctx.createOscillator();
-    compressor.type = "sine";
-    compressor.frequency.value = 57;
-    const compressorGain = ctx.createGain();
-    compressorGain.gain.value = 0;
-    compressor.connect(compressorGain).connect(bus);
-
-    airSource.start();
-    rumbleSource.start();
-    motor.start();
-    bladeTone.start();
-    compressor.start();
-    this.nodes = { airLow, airGain, rumbleLow, rumbleGain, motor, motorGain, bladeTone, bladeGain, compressor, compressorGain };
+  if (portrait){
+    WALL.thermo = {x:42,  y:56,  w:100, h:252};
+    WALL.clock  = {cx:380, cy:158, r:72};
+    WALL.cal    = {x:600, y:56,  w:120, h:150};
+    WALL.tag    = {x:146, y:WALL.rail};
+    FAN.bx = 380;  FAN.hy = FLOOR - 300; FAN.cage = 92;
+    AC.x = 176; AC.y = 352; AC.w = 408; AC.h = 190;
+    DRY.cx = 392; DRY.cy = 500;
+    HAND.px = 380; HAND.py = FLOOR + 4;
+  } else {
+    WALL.thermo = {x:48,  y:156, w:104, h:296};
+    WALL.clock  = {cx:236, cy:206, r:64};
+    WALL.cal    = {x:944, y:130, w:134, h:162};
+    WALL.tag    = {x:806, y:WALL.rail};
+    FAN.bx = 470;  FAN.hy = FLOOR - 322; FAN.cage = 98;
+    AC.x = 400; AC.y = 130; AC.w = 352; AC.h = 172;
+    DRY.cx = 596; DRY.cy = 322;
+    HAND.px = 566; HAND.py = FLOOR - 4;
   }
-
-  async unlock() {
-    if (!this.ctx) this.build();
-    if (this.ctx.state !== "running") await this.ctx.resume();
-    return this.ctx.state === "running";
-  }
-
-  click(strength = 1) {
-    if (!this.ctx || this.ctx.state !== "running") return;
-    const now = this.ctx.currentTime;
-    const oscillator = this.ctx.createOscillator();
-    const gain = this.ctx.createGain();
-    oscillator.type = "square";
-    oscillator.frequency.setValueAtTime(270 + strength * 70, now);
-    oscillator.frequency.exponentialRampToValueAtTime(82, now + .055);
-    gain.gain.setValueAtTime(.055 * strength, now);
-    gain.gain.exponentialRampToValueAtTime(.0001, now + .07);
-    oscillator.connect(gain).connect(this.master);
-    oscillator.start(now);
-    oscillator.stop(now + .075);
-
-    const snap = this.ctx.createBufferSource();
-    snap.buffer = this.makeNoise(.025);
-    const snapFilter = this.ctx.createBiquadFilter();
-    snapFilter.type = "highpass";
-    snapFilter.frequency.value = 1800;
-    const snapGain = this.ctx.createGain();
-    snapGain.gain.setValueAtTime(.035 * strength, now);
-    snapGain.gain.exponentialRampToValueAtTime(.0001, now + .026);
-    snap.connect(snapFilter).connect(snapGain).connect(this.master);
-    snap.start(now);
-  }
-
-  setVolume(value) {
-    if (this.master) this.master.gain.setTargetAtTime(value, this.ctx.currentTime, .035);
-  }
-
-  apply(device, level, windPulse, pan, compressorMix, hot) {
-    if (!this.ctx || !this.nodes) return;
-    const now = this.ctx.currentTime;
-    const n = this.nodes;
-    const audible = clamp(level * windPulse, 0, 1.18);
-    const motorFrequency = lerp(device.sound.motor[0], device.sound.motor[1], clamp(level, 0, 1)) * (hot ? .91 : 1);
-    const bladePass = Math.max(18, state.rpm / 60 * device.blades);
-    const filterCutoff = lerp(device.sound.cutoff[0], device.sound.cutoff[1], clamp(audible, 0, 1));
-
-    n.airLow.frequency.setTargetAtTime(filterCutoff, now, .07);
-    n.airGain.gain.setTargetAtTime(device.sound.air * Math.pow(audible, 1.25) * .28, now, .075);
-    n.rumbleLow.frequency.setTargetAtTime(lerp(72, 142, clamp(level, 0, 1)), now, .1);
-    n.rumbleGain.gain.setTargetAtTime(device.sound.rumble * level * .34, now, .12);
-    n.motor.frequency.setTargetAtTime(Math.max(20, motorFrequency), now, .075);
-    n.motorGain.gain.setTargetAtTime(device.sound.tone * level * .22, now, .08);
-    n.bladeTone.frequency.setTargetAtTime(Math.min(9000, bladePass), now, .06);
-    n.bladeGain.gain.setTargetAtTime(device.sound.tone * audible * .105, now, .08);
-    n.compressor.frequency.setTargetAtTime(57 + level * 7, now, .16);
-    n.compressorGain.gain.setTargetAtTime(device.id === "ac" ? .075 * level * compressorMix : 0, now, .2);
-    if (this.panner.pan) this.panner.pan.setTargetAtTime(pan, now, .07);
-  }
-
-  getWaveform() {
-    if (!this.analyser) return null;
-    this.analyser.getByteTimeDomainData(this.waveform);
-    return this.waveform;
-  }
+  HAND.leafY = HAND.py - 212;
 }
 
-const audio = new CartoonAudio();
-const currentDevice = () => DEVICES[state.deviceIndex];
-
-function renderRoomTime(value) {
-  const date = getRoomDateParts(value);
-  const time = getRoomTimeParts(value);
-  ui.wallCalendar.dateTime = date.iso;
-  ui.calendarWeekday.textContent = date.weekday;
-  ui.calendarDay.textContent = date.day;
-  ui.calendarMonth.textContent = date.month;
-  ui.calendarYear.textContent = date.year;
-  ui.wallClock.dateTime = `${date.iso}T${time.hour}:${time.minute}:${time.second}`;
-  ui.clockHour.textContent = time.hour;
-  ui.clockMinute.textContent = time.minute;
-  ui.clockSecond.textContent = `${time.second} SEC`;
+function fitCanvas(){
+  const box = cv.parentElement.getBoundingClientRect().width || 1180;
+  relayout(box < 680);
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv.width = Math.round(W*dpr); cv.height = Math.round(H*dpr);
+  cv.style.aspectRatio = W + " / " + H;
+  g.setTransform(dpr,0,0,dpr,0,0);
+  g.lineJoin = "round"; g.lineCap = "round";
+  BITS.length = 0; CLOTH.ready = false;
+  if (S.handX === undefined || !portraitScene) S.handX = HAND.px;
+  S.handX = clamp(S.handX, 150, W-150);
 }
+addEventListener("resize", fitCanvas, {passive:true});
 
-const roomClock = createRoomClock(renderRoomTime);
-roomClock.start();
-window.addEventListener("pagehide", () => roomClock.stop());
-window.addEventListener("pageshow", () => roomClock.start());
+// ── hand-drawn primitives ───────────────────────────────────────────────────
+// Golden-age cartoons were shot on twos: two exposures per drawing, twelve new
+// drawings a second. Motion here is smooth at 60, but the ink line is re-wobbled
+// only twelve times a second, so the outline boils the way a real one does.
+const DRAW_HZ = 12;
+let DF = 0;   // which drawing we are on
 
-function makeApplianceTabs() {
-  ui.applianceTabs.replaceChildren(...DEVICES.map((device, index) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "appliance-tab";
-    button.setAttribute("role", "option");
-    button.setAttribute("aria-selected", String(index === state.deviceIndex));
-    button.style.setProperty("--device-main", device.palette.main);
-    button.innerHTML = `<svg viewBox="0 0 100 100" aria-hidden="true"><use href="assets/appliance-icons.svg#${device.icon}"></use></svg><span><b>${device.key} · ${device.short}</b><small>${device.zh}</small></span>`;
-    button.addEventListener("click", () => selectDevice(index));
-    return button;
-  }));
-}
+// Honoured by the drawing as well as by the stylesheet: a boiling ink line and a
+// shaking camera are exactly the sort of motion this setting is asking us to stop.
+const REDUCE = matchMedia("(prefers-reduced-motion: reduce)");
+let calm = REDUCE.matches;
+const setCalm = v => { calm = v; };
+REDUCE.addEventListener("change", e => setCalm(e.matches));
 
-function makeGearButtons() {
-  const device = currentDevice();
-  ui.gearButtons.replaceChildren(...device.gears.map((gear, index) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "gear-button";
-    button.textContent = gear.label;
-    button.setAttribute("aria-label", `${gear.label}, ${Math.round(gear.level * 100)} percent intensity`);
-    button.setAttribute("aria-pressed", String(state.powered && state.gearIndex === index));
-    button.addEventListener("click", async () => {
-      await ensureAudio();
-      audio.click(1 + index * .14);
-      state.gearIndex = index;
-      state.target = gear.level;
-      state.powered = true;
-      updateControls();
-    });
-    return button;
-  }));
-}
+// how hard the wind shoves the camera, and how hard a body shakes on its base
+const knockFor = lv => calm ? 0 : Math.min(1.7, lv + S.camKick);
+const shakeFor = amt => calm ? 0
+  : amt * Math.min(1.15, S.level) * (S.dev.cycle ? lerp(.55, 1.35, S.cycleGain) : 1);
 
-async function ensureAudio() {
-  try {
-    const running = await audio.unlock();
-    state.unlocked = running;
-    if (running) ui.startCurtain.classList.add("hidden");
-    return running;
-  } catch (error) {
-    state.unlocked = false;
-    ui.startCurtain.querySelector("em").textContent = "This browser could not start Web Audio.";
-    return false;
-  }
-}
+const wob = (seed, amp) => vnoise(seed*13.77 + DF*1.31) * (amp === undefined ? 1 : amp);
 
-function selectDevice(index) {
-  state.deviceIndex = index;
-  state.gearIndex = 0;
-  state.target = state.powered ? currentDevice().gears[0].level : 0;
-  state.mode = false;
-  state.compressorOn = true;
-  state.compressorClock = 0;
-  state.manualBurst = 0;
-  if (state.unlocked) audio.click(.75);
-  applyPalette();
-  makeApplianceTabs();
-  makeGearButtons();
-  updateDeviceCopy();
-  updateControls();
-}
-
-function applyPalette() {
-  const { palette } = currentDevice();
-  document.documentElement.style.setProperty("--device-main", palette.main);
-  document.documentElement.style.setProperty("--device-trim", palette.trim);
-}
-
-function updateDeviceCopy() {
-  const device = currentDevice();
-  ui.sceneNumber.textContent = `SCENE ${state.deviceIndex + 1}`;
-  ui.applianceName.textContent = device.name;
-  ui.applianceChinese.textContent = device.zh;
-  ui.applianceCaption.textContent = device.caption;
-  ui.modeLabel.textContent = device.mode.short;
-  ui.modeHint.textContent = device.mode.kind === "manual" ? "CLICK!" : device.mode.kind === "heat" ? "COLD / HOT" : "PULL";
-}
-
-function updateControls() {
-  const device = currentDevice();
-  ui.powerButton.setAttribute("aria-pressed", String(state.powered));
-  ui.powerButton.querySelector("b").textContent = state.powered ? "ON" : "OFF";
-  ui.powerButton.setAttribute("aria-label", state.powered ? "Turn appliance off" : "Turn appliance on");
-  ui.modeButton.setAttribute("aria-pressed", String(state.mode));
-  [...ui.gearButtons.children].forEach((button, index) => button.setAttribute("aria-pressed", String(state.powered && index === state.gearIndex)));
-  ui.speedOutput.textContent = state.powered ? device.gears[state.gearIndex].label : `GEAR ${state.gearIndex + 1} · READY`;
-  ui.muteButton.setAttribute("aria-pressed", String(state.muted));
-  ui.muteButton.querySelector("b").textContent = state.muted ? "SOUND OFF" : "MUTE";
-  updateMachineStatus();
-}
-
-function updateMachineStatus() {
-  const device = currentDevice();
-  const starting = state.powered && state.level < state.target - .07;
-  const stopping = !state.powered && state.level > .025;
-  const message = starting
-    ? "WARMING UP..."
-    : stopping
-      ? "COASTING TO A STOP..."
-      : state.powered
-        ? device.id === "dryer" && state.mode ? "HOT BLAST—AT YOU!" : "BREEZE COMING AT YOU!"
-        : "TAKING A NAP";
-  if (ui.machineStatus.textContent !== message) ui.machineStatus.textContent = message;
-  ui.cartoonStage.setAttribute("aria-label", `${device.name}. ${message}. ${device.gears[state.gearIndex].label}.`);
-}
-
-async function togglePower() {
-  await ensureAudio();
-  audio.click(1.15);
-  state.powered = !state.powered;
-  state.target = state.powered ? currentDevice().gears[state.gearIndex].level : 0;
-  updateControls();
-}
-
-function triggerMode() {
-  const device = currentDevice();
-  if (state.unlocked) audio.click(.92);
-  if (device.mode.kind === "manual") {
-    state.manualBurst = Math.min(1.2, state.manualBurst + .72);
-    ui.modeButton.setAttribute("aria-pressed", "true");
-    window.setTimeout(() => ui.modeButton.setAttribute("aria-pressed", "false"), 170);
-    spawnHandFanBurst();
+// Walks a point list, wobbling each vertex and smoothing through the midpoints.
+function trace(pts, close, amp, seed, sharp){
+  const a = amp === undefined ? 1.6 : amp, s = seed || 0;
+  const P = pts.map((p,i) => [p[0] + wob(s+i*2.1, a), p[1] + wob(s+i*2.1+77, a)]);
+  const n = P.length;
+  g.beginPath();
+  if (sharp){
+    g.moveTo(P[0][0],P[0][1]);
+    for (let i = 1; i < n; i++) g.lineTo(P[i][0],P[i][1]);
+    if (close) g.closePath();
     return;
   }
-  state.mode = !state.mode;
-  updateControls();
-}
-
-function effectiveWind(time) {
-  const device = currentDevice();
-  if (device.id === "handfan") {
-    const pulse = .34 + .66 * Math.pow(Math.max(0, Math.sin(state.flapPhase)), 2.5);
-    return clamp(state.level * pulse + state.manualBurst, 0, 1.25);
-  }
-  if (device.id === "ac") return clamp(state.level * (.78 + .22 * state.compressorMix), 0, 1.05);
-  return state.level;
-}
-
-function coolingEffect(wind) {
-  const device = currentDevice();
-  let effect = device.cooling * wind;
-  if (device.mode.kind === "dry" && state.mode) effect *= 1.18;
-  if (device.mode.kind === "heat" && state.mode) effect = -Math.max(4, device.cooling * 1.65) * wind;
-  return effect;
-}
-
-function step(dt, time) {
-  const device = currentDevice();
-  const desired = state.powered ? state.target : 0;
-  state.level = approach(state.level, desired, desired > state.level ? .58 : 1.25, dt);
-  state.manualBurst = approach(state.manualBurst, 0, .34, dt);
-  const motionScale = state.reducedMotion ? .12 : 1;
-  state.flapPhase += dt * lerp(2.1, 7.2, state.level) * motionScale;
-  state.headPhase += dt * lerp(.62, 1.05, state.level) * motionScale;
-  const wind = effectiveWind(time);
-  state.actionLevel = approach(state.actionLevel, wind, .06, dt);
-
-  const rpmTarget = wind < .001 ? 0 : lerp(device.rpm[0] * .28, device.rpm[1], clamp(wind, 0, 1));
-  state.rpm = approach(state.rpm, rpmTarget, state.powered ? .42 : 1.4, dt);
-  state.rotorAngle += state.rpm / 60 * Math.PI * 2 * dt * motionScale;
-
-  if (device.compressor && state.level > .02) {
-    state.compressorClock += dt;
-    const phaseLength = state.compressorOn ? device.compressor.on : device.compressor.off;
-    if (state.compressorClock >= phaseLength) {
-      state.compressorClock = 0;
-      state.compressorOn = !state.compressorOn;
-    }
-    state.compressorMix = approach(state.compressorMix, state.compressorOn ? 1 : .12, .72, dt);
+  if (n < 3){ g.moveTo(P[0][0],P[0][1]); for (let i=1;i<n;i++) g.lineTo(P[i][0],P[i][1]);
+              if (close) g.closePath(); return; }
+  const mid = (i,j) => [(P[i][0]+P[j][0])/2, (P[i][1]+P[j][1])/2];
+  if (close){
+    let m = mid(n-1,0); g.moveTo(m[0],m[1]);
+    for (let i = 0; i < n; i++){ const nx = mid(i,(i+1)%n); g.quadraticCurveTo(P[i][0],P[i][1],nx[0],nx[1]); }
+    g.closePath();
   } else {
-    state.compressorClock = 0;
-    state.compressorOn = true;
-    state.compressorMix = approach(state.compressorMix, 1, .45, dt);
-  }
-
-  const effect = coolingEffect(wind);
-  state.temperature -= effect * .044 * dt;
-  state.temperature += (AMBIENT_TEMPERATURE - state.temperature) * .0032 * dt;
-  state.temperature = clamp(state.temperature, 13.5, AMBIENT_TEMPERATURE + 7);
-
-  updateParticles(dt, time, wind);
-  state.audioClock += dt;
-  if (state.audioClock > .045) {
-    state.audioClock = 0;
-    const pan = device.mode.kind === "oscillate" && state.mode ? Math.sin(state.headPhase) * .72 : 0;
-    const pulse = device.id === "handfan" ? clamp(.18 + wind * 1.1, .18, 1.2) : 1;
-    audio.apply(device, state.level, pulse, pan, state.compressorMix, device.mode.kind === "heat" && state.mode);
+    g.moveTo(P[0][0],P[0][1]);
+    for (let i = 1; i < n-1; i++){ const m2 = mid(i,i+1); g.quadraticCurveTo(P[i][0],P[i][1],m2[0],m2[1]); }
+    g.lineTo(P[n-1][0],P[n-1][1]);
   }
 }
 
-function emit(kind, x, y, vx, vy, life, size = 1) {
-  if (state.particles.length > 330) return;
-  state.particles.push({ kind, x, y, vx, vy, life, age: 0, size, phase: Math.random() * Math.PI * 2, spin: (Math.random() - .5) * 5 });
+// A cel: flat paint, then the ink line on top of it.
+function cel(pts, fill, w, opt){
+  opt = opt || {};
+  trace(pts, opt.open ? false : true, opt.amp, opt.seed, opt.sharp);
+  if (fill){ g.fillStyle = fill; g.fill(); }
+  if (w !== 0){ g.strokeStyle = opt.stroke || C.ink; g.lineWidth = w || 3.4; g.stroke(); }
 }
 
-function emitToward(kind, x, y, wind, spread = 1) {
-  if (state.particles.length > 330) return;
-  const angle = Math.random() * Math.PI * 2;
-  const speed = (58 + Math.random() * 76) * spread;
-  state.particles.push({
-    kind,
-    x: x + Math.cos(angle) * Math.random() * 18,
-    y: y + Math.sin(angle) * Math.random() * 13,
-    vx: Math.cos(angle) * speed,
-    vy: Math.sin(angle) * speed * .64,
-    life: .58 + Math.random() * .54,
-    age: 0,
-    size: .28 + Math.random() * .34,
-    phase: angle,
-    spin: (Math.random() - .5) * 2,
-    toward: true,
-    wind
+// A standalone ink line whose weight tapers, drawn as a filled ribbon rather than
+// a stroke — a constant-width stroke is the thing that reads as vector, not brush.
+function taperLine(pts, w0, w1, color, amp, seed){
+  const a = amp === undefined ? 1.4 : amp, s = seed || 0;
+  const P = pts.map((p,i) => [p[0] + wob(s+i*3.3, a), p[1] + wob(s+i*3.3+41, a)]);
+  const n = P.length; if (n < 2) return;
+  const L = [], R = [];
+  for (let i = 0; i < n; i++){
+    const p0 = P[Math.max(0,i-1)], p1 = P[Math.min(n-1,i+1)];
+    let dx = p1[0]-p0[0], dy = p1[1]-p0[1];
+    const m = Math.hypot(dx,dy) || 1; dx /= m; dy /= m;
+    const hw = lerp(w0, w1, i/(n-1)) / 2;
+    L.push([P[i][0] - dy*hw, P[i][1] + dx*hw]);
+    R.push([P[i][0] + dy*hw, P[i][1] - dx*hw]);
+  }
+  g.beginPath(); g.moveTo(L[0][0],L[0][1]);
+  for (let i = 1; i < n; i++) g.lineTo(L[i][0],L[i][1]);
+  for (let i = n-1; i >= 0; i--) g.lineTo(R[i][0],R[i][1]);
+  g.closePath(); g.fillStyle = color || C.ink; g.fill();
+}
+
+// A lumpy circle, for clouds of mist, puffs and splashes.
+function blobPts(cx, cy, r, lobes, seed, squish){
+  const p = [], sq = squish === undefined ? 1 : squish;
+  for (let i = 0; i < lobes; i++){
+    const th = i/lobes * Math.PI*2;
+    const rr = r * (.78 + .34*hash(seed + i*7.3));
+    p.push([cx + Math.cos(th)*rr, cy + Math.sin(th)*rr*sq]);
+  }
+  return p;
+}
+const ring = (cx, cy, r, n, sq) => {
+  const p = [], s = sq === undefined ? 1 : sq;
+  for (let i = 0; i < n; i++){ const th = i/n*Math.PI*2; p.push([cx+Math.cos(th)*r, cy+Math.sin(th)*r*s]); }
+  return p;
+};
+function box(x, y, w, h, r){
+  r = Math.min(r === undefined ? 16 : r, w/2, h/2);
+  const p = [];
+  const side = (x0,y0,x1,y1) => {
+    const dx = x1-x0, dy = y1-y0, L = Math.hypot(dx,dy) || 1, ux = dx/L, uy = dy/L;
+    const run = Math.max(0, L - 2*r), steps = Math.max(1, Math.round(run/40));
+    for (let i = 0; i <= steps; i++) p.push([x0 + ux*(r + run*i/steps), y0 + uy*(r + run*i/steps)]);
+  };
+  side(x,y, x+w,y); side(x+w,y, x+w,y+h); side(x+w,y+h, x,y+h); side(x,y+h, x,y);
+  return p;
+}
+
+// ── film grain ──────────────────────────────────────────────────────────────
+const grain = (() => {
+  const t = document.createElement("canvas"); t.width = t.height = 512;
+  const c = t.getContext("2d"), img = c.createImageData(512,512), d = img.data;
+  for (let i = 0; i < d.length; i += 4){
+    const v = 200 + Math.random()*55;
+    d[i] = d[i+1] = d[i+2] = v; d[i+3] = 255;
+  }
+  c.putImageData(img,0,0); return t;
+})();
+
+function drawGrain(){
+  g.save();
+  g.globalCompositeOperation = "multiply";
+  g.globalAlpha = .085;
+  const ox = calm ? -128 : -Math.floor(hash(DF*3.1)*512),
+        oy = calm ? -96  : -Math.floor(hash(DF*7.7+9)*512);
+  for (let x = ox; x < W; x += 512) for (let y = oy; y < H; y += 512) g.drawImage(grain, x, y);
+  g.restore();
+}
+
+// ── the room ────────────────────────────────────────────────────────────────
+function drawRoom(){
+  const wall = g.createLinearGradient(0,0,0,H);
+  wall.addColorStop(0, "#f8eed6"); wall.addColorStop(.72, C.paper); wall.addColorStop(1, C.paper2);
+  g.fillStyle = wall; g.fillRect(0,0,W,H);
+
+  g.fillStyle = "#e6cfa4"; g.fillRect(0, FLOOR, W, H-FLOOR);          // floorboards
+  taperLine([[-10,FLOOR],[W*.4,FLOOR-2],[W+10,FLOOR+1]], 5, 4, C.ink, 1.1, 3);
+  g.strokeStyle = "rgba(138,95,60,.30)"; g.lineWidth = 2;
+  for (let i = 1; i < 8; i++){
+    const x = i*W/8 + wob(i*5+40, 3);
+    g.beginPath(); g.moveTo(x, FLOOR+3); g.lineTo(x + (x-W/2)*.12, H); g.stroke();
+  }
+  taperLine([[-10,FLOOR-16],[W*.55,FLOOR-19],[W+10,FLOOR-15]], 3, 2.4, "rgba(95,64,40,.45)", 1, 8);
+
+  // a picture rail and a sun-bleached patch, so the wall is not a flat field
+  g.globalAlpha = .5;
+  taperLine([[-10,WALL.rail],[W*.5,WALL.rail-4],[W+10,WALL.rail+1]], 4, 3, "rgba(207,174,118,.9)", 1.2, 12);
+  g.globalAlpha = 1;
+  const px2 = W*.78, py2 = H*.30;
+  const patch = g.createRadialGradient(px2, py2, 20, px2, py2, 260);
+  patch.addColorStop(0,"rgba(255,253,245,.42)"); patch.addColorStop(1,"rgba(255,253,245,0)");
+  g.fillStyle = patch; g.fillRect(px2-260, py2-260, 520, 520);
+}
+
+// ── the room's information wall ─────────────────────────────────────────────
+// Clock, calendar and thermometer read as three objects hung on one wall rather
+// than as a dashboard. The date and the time are the visitor's own; the
+// temperature and the comfort reading are openly part of the simulation and the
+// plaque says so.
+// a school-room enamel clock, hands driven by the visitor's own local time
+function drawClock(){
+  const {cx, cy, r} = WALL.clock;
+  const now = new Date();
+  cel(ring(cx, cy+5, r+10, 24), "rgba(36,26,18,.13)", 0, {seed:1500});
+  cel(ring(cx, cy, r+10, 26), C.brown, 4.6, {seed:1501});
+  cel(ring(cx, cy, r+2, 26), C.bone, 3, {seed:1502});
+  cel(ring(cx, cy, r, 26), C.white, 3.2, {seed:1503});
+
+  for (let i = 0; i < 12; i++){
+    const a = i/12*Math.PI*2 - Math.PI/2, big = i % 3 === 0;
+    taperLine([[cx + Math.cos(a)*r*(big ? .70 : .80), cy + Math.sin(a)*r*(big ? .70 : .80)],
+               [cx + Math.cos(a)*r*.90,               cy + Math.sin(a)*r*.90]],
+              big ? 5.5 : 2.6, big ? 4 : 2, C.ink, .4, 1510+i);
+  }
+  const sec = now.getSeconds();                       // a mechanical hand ticks
+  const min = now.getMinutes() + sec/60;
+  const hr  = (now.getHours() % 12) + min/60;
+  const hand = (turn, len, w0, w1, col, seed) => {
+    const a = turn*Math.PI*2 - Math.PI/2;
+    taperLine([[cx - Math.cos(a)*r*.15, cy - Math.sin(a)*r*.15],
+               [cx + Math.cos(a)*r*len, cy + Math.sin(a)*r*len]], w0, w1, col, .3, seed);
+  };
+  hand(hr/12,  .50, 9.5, 4,   C.ink, 1530);
+  hand(min/60, .78, 6.5, 2.8, C.ink, 1532);
+  if (!calm) hand(sec/60, .86, 2.4, 2.4, C.red, 1534);
+  cel(ring(cx, cy, 5.5, 8), C.red, 2.6, {seed:1540});
+}
+
+// A tear-off pad showing today. The bottom sheet lifts toward the lens, which is
+// the cheapest possible proof of which way the air is going.
+function drawCalendar(lv){
+  const {x, y, w, h} = WALL.cal;
+  const p = CLOCK.parts;
+  if (!p) return;
+  const lift = (calm ? .35 : .5 + .5*Math.sin(S.wobbleT*5.6)) * Math.min(1.1, lv) * (h*.46);
+  const head = Math.round(h*.20);
+
+  cel(box(x+5, y+7, w, h, 7), "rgba(36,26,18,.12)", 0, {seed:1401});
+  cel(box(x, y, w, h, 7), C.cream, 3.6, {seed:1402});
+  cel(box(x, y, w, head, 7), C.red, 3.2, {seed:1404});
+  g.textAlign = "center"; g.textBaseline = "alphabetic";
+  g.fillStyle = C.white; g.font = Math.round(h*.095) + "px " + FONT;
+  g.fillText(p.weekday, x + w/2, y + head*.70);
+
+  // the page in front, lifting and widening as it comes toward you
+  cel([[x+6, y+head+3],[x+w-6, y+head+3],
+       [x+w-1 + lift*.44, y+h-6 - lift],[x+1 - lift*.44, y+h-6 - lift]],
+      C.white, 3.2, {seed:1406, sharp:true});
+  const top = y + head + 3, bottom = y + h - 6 - lift, span = Math.max(28, bottom - top);
+  g.fillStyle = C.ink; g.font = "600 " + Math.round(Math.min(h*.30, span*.52)) + "px " + FONT;
+  g.fillText(p.day, x + w/2, top + span*.52);
+  g.fillStyle = C.ink2; g.font = Math.round(Math.min(h*.088, span*.16)) + "px " + FONT;
+  g.fillText(p.month, x + w/2, top + span*.76);
+  g.fillText(p.year,  x + w/2, top + span*.93);
+
+  for (let i = 0; i < 2; i++) cel(ring(x+18+i*(w-36), y+head*.42, 4, 7), C.paper3, 2, {seed:1410+i});
+  g.textAlign = "left";
+}
+
+// ── a paper tag on a string: which way is the air actually going? ───────────
+// It leans away from whichever outlet is running, and hangs still when none is.
+function drawTag(lv){
+  const {x, y} = WALL.tag;
+  const o = outletOf(S.dev, lv);
+  const tx = x - o.x, ty = (y + 70) - o.y, m = Math.hypot(tx, ty) || 1;
+  const push = clamp(lv, 0, 1.1);
+  const idle = calm ? 0 : Math.sin(S.wobbleT*1.1) * .035;
+  const lean = clamp(-(tx/m) * push * .78, -.62, .62) +
+               (calm ? 0 : Math.sin(S.wobbleT*7.3) * .09 * push) + idle;
+
+  cel(ring(x, y, 4.5, 7), C.paper3, 2.4, {seed:1560});                  // the nail
+  g.save(); g.translate(x, y); g.rotate(lean);
+  taperLine([[0,0],[1,34],[0,64]], 3.2, 2.4, "rgba(36,26,18,.55)", .5, 1562);
+  cel(box(-25, 62, 50, 62, 8), C.cream, 3.4, {seed:1564});
+  cel(ring(0, 70, 4, 7), C.paper3, 2, {seed:1566});
+  g.fillStyle = C.ink2; g.font = "10px " + FONT; g.textAlign = "center";
+  g.fillText("DRAUGHT", 0, 96);
+  taperLine([[-15,104],[15,104]], 2, 2, "rgba(36,26,18,.30)", .4, 1568);
+  taperLine([[-15,112],[8,112]],  2, 2, "rgba(36,26,18,.30)", .4, 1569);
+  g.textAlign = "left"; g.restore();
+}
+
+// ── the thermometer on the wall ─────────────────────────────────────────────
+// Reads a number the page invents. It plunges, then frosts over, then cracks.
+function drawThermometer(){
+  const {x:px, y:py, w:pw, h:ph} = WALL.thermo;
+  const cx = px + pw*.44, top = py + ph*.155, bot = py + ph*.63, tw = 26;
+  const chill = clamp((AMBIENT - S.temp)/8, -.5, 1.25);
+  const frozen = chill > .62;
+
+  cel(box(px+5, py+7, pw, ph, 16), "rgba(36,26,18,.13)", 0, {seed:300});
+  cel(box(px, py, pw, ph, 16), C.bone, 4.2, {seed:301});
+  cel(box(px+8, py+8, pw-16, ph-16, 11), C.cream, 2.6, {seed:303});
+  cel(ring(cx, py+ph*.062, 7, 8), C.paper3, 2.6, {seed:305});
+  g.fillStyle = C.ink2; g.font = "12px " + FONT; g.textAlign = "center";
+  g.fillText("HOW HOT", px + pw*.5, py + ph*.088);
+
+  cel(box(cx-tw/2, top, tw, bot-top, tw/2), C.white, 3, {seed:311});
+  cel(ring(cx, bot + pw*.20, pw*.19, 11), C.white, 3, {seed:317});
+
+  const t = clamp((S.temp - 22)/20, 0, 1);
+  const colTop = bot - 8 - (bot-top-16)*t;
+  const fluid = frozen ? C.blue : C.red;
+  g.save();
+  trace(box(cx-7, top+4, 14, bot-top-8, 7), true, .8, 331); g.clip();
+  g.fillStyle = fluid; g.fillRect(cx-9, colTop, 18, bot);
+  g.restore();
+  g.fillStyle = fluid; g.beginPath(); g.arc(cx, bot + pw*.20, pw*.145, 0, 7); g.fill();
+  cel(ring(cx, bot + pw*.20, pw*.145, 9), null, 2, {seed:337, stroke:"rgba(36,26,18,.4)"});
+
+  g.strokeStyle = C.ink2; g.lineWidth = 1.8;
+  g.font = "10px " + FONT; g.textAlign = "left"; g.fillStyle = C.ink2;
+  for (let i = 0; i <= 10; i++){
+    const yy = bot - 8 - (bot-top-16)*i/10, long = i % 5 === 0;
+    g.beginPath(); g.moveTo(cx+tw/2+2, yy); g.lineTo(cx+tw/2+(long?13:7), yy); g.stroke();
+    if (long) g.fillText(String(22 + i*2), cx+tw/2+17, yy+3.5);
+  }
+
+  // comfort strip: a simulated humidity reading, labelled as one
+  const sy = py + ph - 44, sx = px + 14, sw = pw - 28;
+  taperLine([[sx, sy],[sx+sw, sy]], 3, 3, "rgba(36,26,18,.28)", .4, 350);
+  g.textAlign = "center"; g.font = Math.max(7, Math.round(pw*.076)) + "px " + FONT;
+  g.fillStyle = C.ink2;
+  ["MUGGY","FAIR","CRISP"].forEach((w2,i) => g.fillText(w2, sx + sw*(.16 + i*.34), sy + 15));
+  const hx = sx + sw * clamp(1 - S.humid, 0, 1);
+  cel([[hx, sy-11],[hx+5.5, sy-3],[hx-5.5, sy-3]], frozen ? C.blue : C.mustard, 2.2,
+      {seed:352, sharp:true});
+  g.font = "7.5px " + FONT; g.fillStyle = "rgba(36,26,18,.45)";
+  g.fillText("SIMULATED", px + pw*.5, py + ph - 6);
+  g.textAlign = "left";
+}
+
+// ── the department drops by ─────────────────────────────────────────────────
+// A rubber stamp thumps onto the picture, holds, and fades. It is drawn on the
+// canvas, so it cannot cover a control, and it fires at most once per session.
+const STAMP_KEY = "cyberfan.inspected";
+const stampSpent = () => { try { return !!sessionStorage.getItem(STAMP_KEY); } catch (_){ return false; } };
+const spendStamp = () => { try { sessionStorage.setItem(STAMP_KEY, "1"); } catch (_){} };
+
+function drawStamp(){
+  const t = S.stamp;
+  if (t < 0) return;
+  const cx = W * (portraitScene ? .50 : .63), cy = H * (portraitScene ? .60 : .44);
+  const r = Math.min(W, H) * (portraitScene ? .21 : .19);
+  // thump in, hold, fade out — or, if motion is unwelcome, simply be there
+  const inT = clamp(t/.26, 0, 1);
+  const scale = calm ? 1 : 1 + (1 - ease(inT)) * .7 - Math.sin(inT*Math.PI) * .06;
+  const alpha = (calm ? .78 : .78 * ease(inT)) * clamp((4.6 - t)/.8, 0, 1);
+  if (alpha <= .01) return;
+
+  g.save();
+  g.globalAlpha = alpha;
+  g.translate(cx, cy); g.rotate(-.22); g.scale(scale, scale);
+  const ink = "rgba(150,44,31,.92)";
+  cel(ring(0, 0, r, 30), null, 5.5, {seed:1700, amp:2.4, stroke:ink});
+  cel(ring(0, 0, r*.86, 28), null, 2.6, {seed:1702, amp:2, stroke:ink});
+  g.fillStyle = ink; g.textAlign = "center"; g.textBaseline = "middle";
+  g.font = Math.round(r*.155) + "px " + FONT;
+  g.fillText("DEPT. OF IMAGINARY", 0, -r*.42);
+  g.fillText("COOLING", 0, -r*.24);
+  g.font = "600 " + Math.round(r*.30) + "px " + FONT;
+  g.fillText("INSPECTED", 0, r*.02);
+  taperLine([[-r*.62, r*.22],[r*.62, r*.22]], 4, 4, ink, 1.2, 1704);
+  g.font = Math.round(r*.165) + "px " + FONT;
+  g.fillText(CLOCK.parts ? CLOCK.parts.day + " " + CLOCK.parts.month : "TODAY", 0, r*.42);
+  g.font = Math.round(r*.14) + "px " + FONT;
+  g.fillText("PASSED \u00b7 STILL HOT", 0, r*.62);
+  g.textBaseline = "alphabetic"; g.textAlign = "left";
+  g.restore();
+}
+
+// ── frost creeping in from the edges ────────────────────────────────────────
+function drawFrost(){
+  const f = S.frost;
+  if (f < .02) return;
+  const inset = 6 + 68*f;
+
+  const vg = g.createLinearGradient(0,0,0,H);
+  vg.addColorStop(0,"rgba(201,230,238,"+(.40*f)+")"); vg.addColorStop(.5,"rgba(201,230,238,0)");
+  vg.addColorStop(1,"rgba(201,230,238,"+(.32*f)+")");
+  g.fillStyle = vg; g.fillRect(0,0,W,H);
+  const hgd = g.createLinearGradient(0,0,W,0);
+  hgd.addColorStop(0,"rgba(201,230,238,"+(.40*f)+")"); hgd.addColorStop(.42,"rgba(201,230,238,0)");
+  hgd.addColorStop(.58,"rgba(201,230,238,0)"); hgd.addColorStop(1,"rgba(201,230,238,"+(.40*f)+")");
+  g.fillStyle = hgd; g.fillRect(0,0,W,H);
+
+  // Real frost grows as ferns: a spine with barbs off it. Blobs read as pebbles.
+  g.globalAlpha = clamp(f*.95, 0, 1);
+  const fern = (x, y, dx, dy, len, s) => {
+    const px = -dy, py = dx, lean = (hash(s)*2-1)*.5;
+    const tip = [x + dx*len + px*lean*len*.4, y + dy*len + py*lean*len*.4];
+    const mid = [x + dx*len*.55 + px*lean*len*.16, y + dy*len*.55 + py*lean*len*.16];
+    brush([[x,y], mid, tip], u => lerp(7, 1.1, u), C.white, .7, s);
+    const barbs = 2 + Math.round(hash(s+5)*2);
+    for (let k = 1; k <= barbs; k++){
+      const t = k/(barbs+1), bl = len*(.42 - .10*t);
+      const bx = lerp(x, tip[0], t), by = lerp(y, tip[1], t);
+      for (const side of [1,-1]){
+        const ax = dx*.62 + px*side*.78, ay = dy*.62 + py*side*.78;
+        brush([[bx,by],[bx+ax*bl, by+ay*bl]], u => lerp(4, .9, u), C.white, .6, s+k*3+side);
+      }
+    }
+  };
+  const edges = [
+    {n:13, at:i => [ (i+.5)*W/13, -2 ],  d:[0,1]},
+    {n:13, at:i => [ (i+.5)*W/13, H+2 ], d:[0,-1]},
+    {n:8,  at:i => [ -2, (i+.5)*H/8 ],   d:[1,0]},
+    {n:8,  at:i => [ W+2, (i+.5)*H/8 ],  d:[-1,0]},
+  ];
+  edges.forEach((e, ei) => {
+    for (let i = 0; i < e.n; i++){
+      const [x,y] = e.at(i), s = 600 + ei*100 + i*7;
+      fern(x, y, e.d[0], e.d[1], inset*(.55 + .85*hash(s)), s);
+      if (f > .55) fern(x + e.d[1]*26, y + e.d[0]*26, e.d[0], e.d[1], inset*.5*(.5+hash(s+2)), s+50);
+    }
+  });
+  // creased sheets in the corners, where frost always wins first
+  [[0,0,1,1],[W,0,-1,1],[0,H,1,-1],[W,H,-1,-1]].forEach(([cx,cy,sx,sy],i) => {
+    const L = inset*1.5;
+    cel([[cx, cy+sy*L],[cx+sx*L*.34, cy+sy*L*.52],[cx+sx*L*.52, cy+sy*L*.30],
+         [cx+sx*L*.78, cy+sy*L*.26],[cx+sx*L, cy]],
+        C.white, 2, {seed:820+i, amp:1.1, sharp:true});
+  });
+  g.globalAlpha = 1;
+}
+
+// ── things in the air ───────────────────────────────────────────────────────
+// One list, a handful of kinds. Each kind knows how to move and how to be drawn.
+const BITS = [];
+const spawn = o => { if (BITS.length < (calm ? 190 : 460)) BITS.push(Object.assign({life:0, max:1, s:Math.random()*99}, o)); };
+
+// How far out a radial bit has to travel before it is past the camera. Anything
+// beyond this is behind your head.
+const ASPECT_X = 1.24, ASPECT_Y = .84;
+const radialPos = b => [b.ox + Math.cos(b.ang)*b.r*ASPECT_X,
+                        b.oy + Math.sin(b.ang)*b.r*ASPECT_Y];
+
+function stepBits(dt){
+  for (let i = BITS.length-1; i >= 0; i--){
+    const b = BITS[i];
+    b.life += dt;
+    const t = b.life/b.max;
+    switch (b.k){
+      // Perspective, done the cheap and correct way: something approaching at a
+      // constant speed covers more of your view every frame, so accelerate it and
+      // grow it together. That single rule is what sells "at you" over "across".
+      case "gust": case "ring": case "fly":
+        b.v *= 1 + b.accel*dt;
+        b.r += b.v*dt;
+        if (b.swirl) b.ang += b.swirl * dt * (1 - clamp(b.r/REACH, 0, .85));
+        if (b.spin !== undefined) b.spin += b.dspin*dt;
+        if (b.r > REACH*1.5) b.life = b.max;
+        break;
+      case "wind":
+        b.vy += Math.sin(b.s + b.life*6.2) * 58 * t * dt;
+        b.vx *= 1 - .22*dt; b.vy *= 1 - .34*dt;
+        break;
+      case "mist":
+        b.vy += 26*dt;                       // cold air is heavy and rolls downward
+        b.vx *= 1 - .9*dt; b.vy *= 1 - .5*dt;
+        b.r += b.grow*dt;
+        break;
+      case "drop": case "sweat":
+        b.vy += 900*dt; b.vx *= 1 - .4*dt;
+        if (b.y > FLOOR - 2 && b.vy > 0){ b.splash = true; b.vy = 0; b.vx = 0; b.max = Math.min(b.max, b.life + .28); }
+        break;
+      case "spark":
+        b.vy += 210*dt; b.vx *= 1 - 1.5*dt; b.vy *= 1 - 1.1*dt;
+        break;
+      case "ice":
+        b.vy += 120*dt; b.vx *= 1 - 1.1*dt; b.spin += b.dspin*dt;
+        break;
+      case "leaf":
+        b.vy += 150*dt;
+        b.vx += Math.sin(b.s + b.life*3.1) * 130 * dt;
+        b.vx *= 1 - .8*dt; b.vy = Math.min(b.vy, 210);
+        b.spin += b.dspin*dt;
+        break;
+    }
+    if (b.k === "gust" || b.k === "ring" || b.k === "fly"){
+      const p = radialPos(b); b.x = p[0]; b.y = p[1];
+    } else {
+      b.x += b.vx*dt; b.y += b.vy*dt;
+    }
+    if (t >= 1 || b.x < -260 || b.x > W+260 || b.y > H+260 || b.y < -280) BITS.splice(i,1);
+  }
+}
+
+// double-tapered brush stroke: the shape a speed line actually has
+function brush(pts, wfn, color, amp, seed){
+  const a = amp === undefined ? 1.2 : amp, s = seed || 0;
+  const Q = pts.map((p,i) => [p[0] + wob(s+i*3.3, a), p[1] + wob(s+i*3.3+41, a)]);
+  const n = Q.length; if (n < 2) return;
+  const L = [], R = [];
+  for (let i = 0; i < n; i++){
+    const p0 = Q[Math.max(0,i-1)], p1 = Q[Math.min(n-1,i+1)];
+    let dx = p1[0]-p0[0], dy = p1[1]-p0[1];
+    const m = Math.hypot(dx,dy) || 1; dx /= m; dy /= m;
+    const hw = wfn(i/(n-1)) / 2;
+    L.push([Q[i][0] - dy*hw, Q[i][1] + dx*hw]);
+    R.push([Q[i][0] + dy*hw, Q[i][1] - dx*hw]);
+  }
+  g.beginPath(); g.moveTo(L[0][0],L[0][1]);
+  for (let i = 1; i < n; i++) g.lineTo(L[i][0],L[i][1]);
+  for (let i = n-1; i >= 0; i--) g.lineTo(R[i][0],R[i][1]);
+  g.closePath(); g.fillStyle = color || C.ink; g.fill();
+}
+
+function drawBits(){
+  for (const b of BITS){
+    const t = b.life/b.max, fade = clamp(Math.min(t*5, (1-t)*2.6), 0, 1);
+    g.globalAlpha = fade * (b.a === undefined ? 1 : b.a);
+    switch (b.k){
+      // A radial streak, trailing back toward where it came from. It gets longer
+      // and fatter as it nears the lens, then leaves frame.
+      case "gust": {
+        const k = clamp(b.r/REACH, 0, 1.6);
+        const nx = Math.cos(b.ang)*ASPECT_X, ny = Math.sin(b.ang)*ASPECT_Y;
+        const m = Math.hypot(nx,ny) || 1, ux = nx/m, uy = ny/m;
+        const len = 22 + 168*k, wid = b.w * (.30 + 2.9*k);
+        const tx = -uy, ty = ux, curl = (b.swirl || 0) * len * .09;
+        const pts = [];
+        for (let i = 0; i <= 4; i++){
+          const u = i/4, back = (1-u)*len;
+          pts.push([b.x - ux*back + tx*curl*(1-u)*(1-u), b.y - uy*back + ty*curl*(1-u)*(1-u)]);
+        }
+        g.globalAlpha = fade * clamp(1.15 - k*.55, 0, 1) * (b.a === undefined ? 1 : b.a);
+        brush(pts, u => Math.sin(u*Math.PI*.86 + .14)*wid, b.c || "rgba(74,54,38,.5)", 1.1, b.s);
+        if (b.hi) brush(pts.map(q => [q[0], q[1]-wid*.5]),
+                        u => Math.sin(u*Math.PI*.86 + .14)*wid*.38, "rgba(255,253,245,.9)", 1, b.s+3);
+        break;
+      }
+      // The expanding arc a cartoonist draws when a blast is aimed at you.
+      case "ring": {
+        const k = clamp(b.r/REACH, 0, 1.6);
+        g.globalAlpha = fade * clamp(1 - k*.78, 0, 1) * .9;
+        for (let seg = 0; seg < 3; seg++){
+          const a0 = b.s*.07 + seg*2.094 + k*.55, span = 1.18 - k*.24;
+          const pts = [];
+          for (let i = 0; i <= 8; i++){
+            const th = a0 + span*i/8;
+            pts.push([b.ox + Math.cos(th)*b.r*ASPECT_X, b.oy + Math.sin(th)*b.r*ASPECT_Y]);
+          }
+          brush(pts, u => Math.sin(u*Math.PI)*(2.5 + 10*k), b.c || "rgba(74,54,38,.45)",
+                1.4 + 3.4*k, b.s + seg*11);
+        }
+        break;
+      }
+      case "fly": {
+        const k = clamp(b.r/REACH, 0, 1.6);
+        const sz = b.r0 * (.35 + 2.6*k);
+        g.globalAlpha = fade * clamp(1.2 - k*.6, 0, 1);
+        g.save(); g.translate(b.x, b.y); g.rotate(b.spin);
+        if (b.leaf){
+          cel([[-sz,0],[0,-sz*.62],[sz,0],[0,sz*.62]], b.c || C.sage, 2.4, {seed:b.s, amp:.9});
+          taperLine([[-sz*.8,0],[sz*.8,0]], 2.2, 1.2, "rgba(36,26,18,.45)", .5, b.s+5);
+        } else {
+          cel(blobPts(0, 0, sz, 6, b.s, .85), b.c || "rgba(138,95,60,.55)", 0, {seed:b.s, amp:1});
+        }
+        g.restore(); break;
+      }
+      case "wind": {
+        const sp = Math.hypot(b.vx,b.vy) || 1, nx = b.vx/sp, ny = b.vy/sp;
+        const len = clamp(sp*.115, 30, 138), px = -ny, py = nx;
+        const bow = b.bow * 12;
+        const pts = [];
+        for (let i = 0; i <= 4; i++){
+          const u = i/4;
+          pts.push([b.x + nx*len*u + px*Math.sin(u*Math.PI)*bow,
+                    b.y + ny*len*u + py*Math.sin(u*Math.PI)*bow]);
+        }
+        brush(pts, u => Math.sin(u*Math.PI)*b.w, b.c || "rgba(74,54,38,.55)", .9, b.s);
+        if (b.hi) brush(pts.map(q => [q[0], q[1]-1.6]),
+                        u => Math.sin(u*Math.PI)*b.w*.42, "rgba(255,253,245,.85)", .9, b.s+3);
+        break;
+      }
+      case "mist":
+        g.globalAlpha *= .52;
+        cel(blobPts(b.x, b.y, b.r, 9, b.s, .72), b.c || C.white, 0, {seed:b.s, amp:2.6});
+        break;
+      case "drop": case "sweat":
+        if (b.splash){
+          const k = clamp((b.life - (b.max-.28))/.28, 0, 1);
+          for (let i = 0; i < 5; i++){
+            const th = -Math.PI + i*(Math.PI/4);
+            const r = 6 + 22*k;
+            cel(ring(b.x + Math.cos(th)*r, b.y - Math.abs(Math.sin(th))*r*.7 - k*4, 3.4*(1-k*.6), 6),
+                C.blueLt, 1.8, {seed:b.s+i, amp:.9});
+          }
+        } else {
+          // a cartoon drop: round bottom, pointed top
+          cel([[b.x, b.y - b.r*1.9], [b.x + b.r*.85, b.y + b.r*.15], [b.x, b.y + b.r],
+               [b.x - b.r*.85, b.y + b.r*.15]], b.c || C.blueLt, 2.2, {seed:b.s, amp:.7});
+        }
+        break;
+      case "spark":
+        g.fillStyle = b.c || C.ember;
+        g.beginPath(); g.arc(b.x, b.y, b.r*(1-t*.5), 0, 7); g.fill();
+        g.strokeStyle = "rgba(226,96,60,.55)"; g.lineWidth = 1.6;
+        g.beginPath(); g.moveTo(b.x, b.y); g.lineTo(b.x - b.vx*.026, b.y - b.vy*.026); g.stroke();
+        break;
+      case "ice": {
+        g.save(); g.translate(b.x, b.y); g.rotate(b.spin);
+        for (let i = 0; i < 3; i++){
+          g.rotate(Math.PI/3);
+          taperLine([[-b.r,0],[b.r,0]], 3.2, 3.2, C.blueLt, .5, b.s+i);
+        }
+        g.restore(); break;
+      }
+      case "leaf": {
+        g.save(); g.translate(b.x, b.y); g.rotate(b.spin);
+        cel([[-b.r,0],[0,-b.r*.62],[b.r,0],[0,b.r*.62]], b.c || C.sage, 2.4, {seed:b.s, amp:.8});
+        taperLine([[-b.r*.8,0],[b.r*.8,0]], 2, 1, "rgba(36,26,18,.45)", .5, b.s+5);
+        g.restore(); break;
+      }
+    }
+  }
+  g.globalAlpha = 1;
+}
+
+// ── the ribbon tied to the fan cage ─────────────────────────────────────────
+// Eight verlet points with a length constraint. It is the cheapest thing on the
+// page that makes the wind look real, because it lags.
+const CLOTH = {n:8, seg:11, x:[], y:[], px:[], py:[], ready:false};
+function stepCloth(dt, ax, ay, wx, wy){
+  const c = CLOTH;
+  if (!c.ready){
+    for (let i = 0; i < c.n; i++){ c.x[i] = ax + i*c.seg; c.y[i] = ay + i*2; c.px[i] = c.x[i]; c.py[i] = c.y[i]; }
+    c.ready = true;
+  }
+  const h = Math.min(dt, 1/120);
+  for (let i = 0; i < c.n; i++){
+    const vx = (c.x[i]-c.px[i]) * .94, vy = (c.y[i]-c.py[i]) * .94;
+    c.px[i] = c.x[i]; c.py[i] = c.y[i];
+    const taper = i/(c.n-1);
+    const flap = Math.sin(S.wobbleT*13 + i*1.1) * wx * .45;   // the flutter, not just the push
+    c.x[i] += vx + (wx*taper*.34) * h*h * 60;
+    c.y[i] += vy + (980 + (wy + flap)*taper) * h*h * 60;
+  }
+  c.x[0] = ax; c.y[0] = ay; c.px[0] = ax; c.py[0] = ay;
+  for (let k = 0; k < 4; k++){
+    for (let i = 0; i < c.n-1; i++){
+      let dx = c.x[i+1]-c.x[i], dy = c.y[i+1]-c.y[i];
+      const dist = Math.hypot(dx,dy) || 1, diff = (dist - c.seg)/dist * .5;
+      dx *= diff; dy *= diff;
+      if (i > 0){ c.x[i] += dx; c.y[i] += dy; }
+      c.x[i+1] -= dx; c.y[i+1] -= dy;
+    }
+    c.x[0] = ax; c.y[0] = ay;
+  }
+}
+function drawCloth(){
+  const c = CLOTH; if (!c.ready) return;
+  const pts = []; for (let i = 0; i < c.n; i++) pts.push([c.x[i], c.y[i]]);
+  brush(pts, u => 13 - 8*u, C.red, .7, 61);
+  brush(pts, u => 9 - 6*u, C.redLt, .7, 61);
+  cel(ring(c.x[0], c.y[0], 5, 7), C.mustard, 2.2, {seed:67});   // the knot
+}
+
+// ── shared machinery for the drawings ───────────────────────────────────────
+// Squash and stretch, applied to the whole body around a pivot on the floor. The
+// product of the two scales stays at one, so the thing keeps its volume the way a
+// drawn character does.
+function withShake(px, py, amt, fn){
+  const k = shakeFor(amt);
+  const t = S.wobbleT;
+  const sy = 1 + Math.sin(t*26.5)*.032*k, sx = 1/sy;
+  g.save();
+  g.translate(px + vnoise(t*21)*6.5*k, py + vnoise(t*19+7)*4*k);
+  g.rotate(vnoise(t*17+3)*.048*k);
+  g.scale(sx, sy);
+  g.translate(-px, -py);
+  fn();
+  g.restore();
+}
+
+// Distinct blades below a crawl, a blurred disc above it, cross-faded between —
+// which is how a real fan looks and how it was always drawn.
+function bladeDisc(cx, cy, r, blades, angle, lv, paint, sq){
+  const s = sq === undefined ? 1 : sq;
+  const blurT = clamp((lv - .10)/.32, 0, 1);
+  const hub = r*.20;
+
+  if (blurT < 1){
+    g.globalAlpha = 1 - blurT;
+    g.save(); g.translate(cx,cy); g.scale(s,1); g.rotate(angle);
+    for (let b = 0; b < blades; b++){
+      const th = b/blades*Math.PI*2, wd = Math.PI/blades*.80;
+      cel([[Math.cos(th)*hub, Math.sin(th)*hub],
+           [Math.cos(th+wd*.55)*r*.66, Math.sin(th+wd*.55)*r*.66],
+           [Math.cos(th+wd)*r, Math.sin(th+wd)*r],
+           [Math.cos(th+wd*.25)*r*.82, Math.sin(th+wd*.25)*r*.82],
+           [Math.cos(th-wd*.20)*hub, Math.sin(th-wd*.20)*hub]],
+          paint, 3, {seed: 900+b, amp:1.1});
+    }
+    g.restore(); g.globalAlpha = 1;
+  }
+  if (blurT > 0){
+    g.save(); g.translate(cx,cy); g.scale(s,1);
+    g.globalAlpha = blurT*.20;
+    g.fillStyle = paint; g.beginPath(); g.arc(0,0,r,0,7); g.fill();
+    g.globalAlpha = blurT*.80;                                  // smears that survive the blur
+    g.strokeStyle = paint; g.lineWidth = r*.16;
+    const smears = Math.min(3, blades);
+    for (let i = 0; i < smears; i++){
+      const a0 = angle + i/smears*Math.PI*2;
+      g.beginPath(); g.arc(0, 0, r*(.42 + .21*i), a0, a0 + 2.2 - blurT*.8); g.stroke();
+    }
+    g.globalAlpha = blurT*.42;
+    g.strokeStyle = C.ink; g.lineWidth = 2.4;
+    g.beginPath(); g.arc(0,0,r,0,7); g.stroke();
+    g.restore(); g.globalAlpha = 1;
+  }
+  cel(ring(cx, cy, hub*.9, 9, s), C.mustard, 3, {seed:919});     // spinner cap
+}
+
+// the little pressed keys on an appliance body
+function miniKeys(x, y, n, active, gap, labels){
+  for (let i = 0; i < n; i++){
+    const on = i === active, cx = x + i*gap;
+    const dy = on ? 3 : 0;
+    cel(ring(cx, y + dy, 10, 9), on ? C.red : C.bone, 2.8, {seed:930+i, amp:.8});
+    if (!on) cel(ring(cx, y - 2.5, 6.5, 8), C.cream, 0, {seed:940+i, amp:.6});
+    if (labels){
+      g.fillStyle = C.ink2; g.font = "9px " + FONT; g.textAlign = "center";
+      g.fillText(labels[i], cx, y + dy + 20);
+    }
+  }
+  g.textAlign = "left";
+}
+const FONT = '"Chalkboard SE","Marker Felt","Comic Sans MS",ui-rounded,system-ui,sans-serif';
+
+// ── 1 · the oscillating fan ─────────────────────────────────────────────────
+function drawFan(lv){
+  const {bx, cage} = FAN, by = FLOOR, hy = FAN.hy;
+  const sweep = (S.pin ? Math.sin(S.headPhase)*.62 : 0);
+  const fore = Math.cos(sweep)*.34 + .66;
+
+  withShake(bx, by, S.dev.shake, () => {
+    cel([[bx-100,by],[bx+100,by],[bx+74,by-46],[bx-74,by-46]], C.mustard, 4, {seed:1001});
+    cel([[bx-74,by-46],[bx+74,by-46],[bx+68,by-56],[bx-68,by-56]], C.mustardDk, 3.4, {seed:1004});
+    miniKeys(bx-48, by-30, 4, S.on ? S.gear+1 : 0, 32, ["0","1","2","3"]);
+
+    cel([[bx-15,by-52],[bx+15,by-52],[bx+10,hy+54],[bx-10,hy+54]], C.cream, 4, {seed:1010});
+    taperLine([[bx-7,by-54],[bx-5,hy+56]], 4, 3, "rgba(36,26,18,.20)", .7, 1013);
+
+    g.save();
+    g.translate(bx + Math.sin(sweep)*20, hy);
+    g.scale(fore, 1);
+    g.translate(-bx, -hy);
+
+    cel([[bx-34,hy-30],[bx+34,hy-30],[bx+38,hy+34],[bx-38,hy+34]], C.bone, 4, {seed:1020});
+    const pinLift = S.pin ? 13 : 0;                              // the pin you pull up to swing
+    cel([[bx-7,hy-36-pinLift],[bx+7,hy-36-pinLift],[bx+7,hy-24],[bx-7,hy-24]], C.cream, 3, {seed:1024});
+    cel(ring(bx, hy-40-pinLift, 8, 8), S.pin ? C.sage : C.paper3, 3, {seed:1027});
+
+    bladeDisc(bx, hy, cage*.84, 4, S.rotorAngle, lv, C.red, 1);
+
+    g.strokeStyle = C.ink; g.lineWidth = 2;                      // cage: rings then spokes
+    for (let i = 1; i <= 4; i++){
+      g.globalAlpha = .5; trace(ring(bx, hy, cage*i/4.6, 24), true, 1.1, 1030+i); g.stroke();
+    }
+    g.globalAlpha = .42;
+    for (let i = 0; i < 26; i++){
+      const th = i/26*Math.PI*2;
+      g.beginPath();
+      g.moveTo(bx + Math.cos(th)*cage*.20, hy + Math.sin(th)*cage*.20);
+      g.lineTo(bx + Math.cos(th)*cage, hy + Math.sin(th)*cage);
+      g.stroke();
+    }
+    g.globalAlpha = 1;
+    cel(ring(bx, hy, cage, 30), null, 5.5, {seed:1050});
+    cel(ring(bx, hy, cage*.20, 12), C.bone, 3, {seed:1054});
+    g.restore();
+  });
+
+  // the ribbon is simulated in step(); it hangs outside the shake so it lags
+  drawCloth();
+}
+
+// ── 2 · the window air conditioner ──────────────────────────────────────────
+let puddle = 0;
+function drawAC(lv){
+  const {x, y, w, h} = AC;
+  const cold = !S.mode;                                  // false = COOL, true = DRY
+
+  cel(box(x-30, y-26, w+60, h+84, 9), C.paper2, 4.5, {seed:1101});
+  cel(box(x-22, y-18, w+44, h+34, 7), "#dfe9e4", 3.6, {seed:1104});
+  cel(box(x-34, y+h+50, w+68, h*0+20, 6), C.brown, 4, {seed:1107});
+
+  withShake(x+w/2, y+h, S.dev.shake, () => {
+    cel(box(x, y, w, h), C.cream, 4.5, {seed:1110});
+    cel(box(x+10, y+10, w-20, h*.52), C.bone, 3.4, {seed:1113});
+    g.strokeStyle = "rgba(36,26,18,.34)"; g.lineWidth = 2.4;     // intake grille
+    for (let i = 1; i < 22; i++){
+      const gx = x + 12 + i*(w-24)/22;
+      g.beginPath(); g.moveTo(gx, y+16); g.lineTo(gx, y+h*.52+4); g.stroke();
+    }
+    cel([[x+16,y+h*.56+8],[x+w-16,y+h*.56+8],[x+w-16,y+h-12],[x+16,y+h-12]], C.bone, 3.4, {seed:1120});
+
+    const la = (lv > .02 ? Math.sin(S.headPhase*.9)*.42 : 0) + .30;
+    for (let i = 0; i < 3; i++){                                 // swinging louvers
+      const ly = y + h*.62 + 14 + i*18, half = w/2 - 30;
+      const tilt = la*1.15 + i*.05, sq = Math.max(.18, Math.cos(tilt));
+      cel([[x+w/2-half, ly - 6*sq],[x+w/2+half, ly - 6*sq],
+           [x+w/2+half, ly + 6*sq],[x+w/2-half, ly + 6*sq]],
+          i%2 ? C.paper3 : C.bone, 2.6, {seed:1130+i, amp:.7, sharp:true});
+    }
+
+    const lamp = (cx, cy, lit, col) => {
+      cel(ring(cx, cy, 9, 9), lit ? col : C.paper3, 3, {seed:1140+cx, amp:.7});
+      if (lit){ g.globalAlpha = .40; cel(ring(cx, cy, 15, 10), col, 0, {seed:1145, amp:1.2}); g.globalAlpha = 1; }
+    };
+    const lit = lv > .04;
+    lamp(x+w-44, y+30, lit && cold, C.blue);
+    lamp(x+w-44, y+58, lit && !cold, C.mustard);
+    g.fillStyle = C.ink2; g.font = "10px " + FONT; g.textAlign = "right";
+    g.fillText("COOL", x+w-58, y+34); g.fillText("DRY", x+w-58, y+62);
+    g.textAlign = "left";
+    miniKeys(x+30, y+h-32, 3, S.on ? S.gear+1 : 0, 30, ["0","L","H"]);
+  });
+
+  if (puddle > .01){                                             // it always leaves a puddle
+    g.globalAlpha = clamp(puddle, 0, .8);
+    cel(blobPts(x+w*.5, FLOOR+8, 26 + 74*Math.min(1,puddle), 10, 1180, .22), C.blueLt, 2.6, {seed:1182, amp:1.6});
+    g.globalAlpha = 1;
+  }
+}
+
+// ── 3 · the hair dryer ──────────────────────────────────────────────────────
+// Aimed down the barrel at the viewer, which is the whole point: a dryer drawn in
+// profile blows past you, a dryer drawn end-on blows at you.
+function drawDryer(lv){
+  const hot = S.mode, cx = DRY.cx, cy = DRY.cy;
+  const paint = hot ? C.hot : C.blue, bore = hot ? "#8e2f1e" : "#2f5f6d";
+
+  withShake(cx-70, cy+250, S.dev.shake, () => {
+    const B = [cx-158, cy-112], F = [cx, cy], rb = 54, rf = 96;  // back and front rims
+    let dx = F[0]-B[0], dy = F[1]-B[1];
+    const m = Math.hypot(dx,dy) || 1; dx /= m; dy /= m;
+    const nx = -dy, ny = dx;
+
+    cel(ring(B[0], B[1], rb, 20, .92), C.redDk, 4.6, {seed:1206});            // back of the barrel
+    cel([[B[0]+nx*rb, B[1]+ny*rb], [F[0]+nx*rf, F[1]+ny*rf],
+         [F[0]-nx*rf, F[1]-ny*rf], [B[0]-nx*rb, B[1]-ny*rb]],
+        C.red, 5, {seed:1210, sharp:true});                                   // the barrel
+    brush([[B[0]+nx*rb*.42, B[1]+ny*rb*.42], [F[0]+nx*rf*.44, F[1]+ny*rf*.44]],
+          u => lerp(15, 24, u), C.cream, .8, 1214);                           // chrome stripe
+
+    cel(ring(cx, cy, rf, 24, .90), paint, 5.5, {seed:1220});                  // nozzle mouth
+    cel(ring(cx, cy, rf*.78, 22, .90), bore, 3.6, {seed:1222});               // the bore
+
+    if (lv > .04){
+      if (hot){
+        for (let i = 0; i < 4; i++){                                          // element, glowing
+          const a = i/4*Math.PI, glow = .34 + .5*lv*(.6 + .4*Math.sin(S.wobbleT*7 + i*1.9));
+          g.strokeStyle = "rgba(245,166,60," + glow.toFixed(3) + ")";
+          g.lineWidth = 5;
+          g.beginPath();
+          g.moveTo(cx - Math.cos(a)*rf*.62, cy - Math.sin(a)*rf*.56);
+          g.lineTo(cx + Math.cos(a)*rf*.62, cy + Math.sin(a)*rf*.56);
+          g.stroke();
+        }
+      } else {
+        for (let i = 0; i < 4; i++){                                          // cold fins
+          const a = i/4*Math.PI;
+          taperLine([[cx - Math.cos(a)*rf*.66, cy - Math.sin(a)*rf*.58],
+                     [cx + Math.cos(a)*rf*.66, cy + Math.sin(a)*rf*.58]],
+                    5, 3, "rgba(201,230,238,.8)", .6, 1240+i);
+        }
+      }
+    }
+    bladeDisc(cx, cy, rf*.52, 11, S.rotorAngle, lv, hot ? "#d8734f" : "#9ac7d4", .90);
+
+    // handle, wider at the bottom because that end is nearer
+    cel([[cx-124, cy+52],[cx-58, cy+72],[cx-40, cy+250],[cx-140, cy+244]], C.redDk, 5, {seed:1201});
+    cel([[cx-112, cy+86],[cx-70, cy+98],[cx-66, cy+128],[cx-110, cy+118]], C.bone, 3, {seed:1204});
+    miniKeys(cx-102, cy+106, 3, S.on ? S.gear+1 : 0, 17, null);
+
+    cel(box(cx-146, cy+206, 104, 34, 15), C.white, 4.4, {seed:1270});         // cuff
+    cel(blobPts(cx-92, cy+168, 46, 10, 1250, .95), C.white, 4.8, {seed:1252, amp:1.3});
+    for (let i = 0; i < 3; i++)                                               // fingers over the grip
+      cel(blobPts(cx-128 + (i%2)*4, cy+134 + i*31, 16, 8, 1260+i), C.white, 3.6, {seed:1264+i, amp:1});
+    cel(blobPts(cx-58, cy+142, 15, 8, 1268, .82), C.white, 3.6, {seed:1269, amp:1});
+    for (let i = 0; i < 2; i++)
+      taperLine([[cx-112 + i*18, cy+136],[cx-104 + i*18, cy+192]], 2.6, 1.6, "rgba(36,26,18,.30)", .7, 1274+i);
   });
 }
 
-function spawnHandFanBurst() {
-  for (let i = 0; i < 10; i++) emitToward(i % 3 ? "leaf" : "sweat", 475, 292, 1.2, 1.45);
-}
+// ── 4 · the palm-leaf fan ───────────────────────────────────────────────────
+function drawHandFan(lv){
+  const swing = Math.sin(S.swingPhase) * (.30 + .34*Math.min(1.15, lv));
+  const px = S.handX, py = HAND.py;
 
-function updateParticles(dt, time, wind) {
-  const device = currentDevice();
-  if (state.reducedMotion) {
-    state.particles.length = 0;
-    state.particleCarry = 0;
-    return;
+  g.save(); g.translate(px, py); g.rotate(swing);
+  taperLine([[0,0],[2,-58],[0,-116]], 21, 15, C.brown, .9, 1301);             // bamboo handle
+  for (let i = 0; i < 2; i++)
+    taperLine([[-9,-38-i*40],[9,-40-i*40]], 4, 4, C.brownDk, .5, 1305+i);     // nodes
+
+  const leaf = [];                                                            // the leaf itself
+  for (let i = 0; i < 18; i++){
+    const th = i/18*Math.PI*2;
+    const rx = 104, ry = 122, pinch = .55 + .45*(1 - Math.max(0, Math.sin(th)));
+    leaf.push([Math.cos(th)*rx*pinch, -212 + Math.sin(th)*ry]);
   }
-  state.particleCarry += wind * 36 * dt;
-  while (state.particleCarry >= 1) {
-    state.particleCarry -= 1;
-    if (device.id === "fan") emitToward("wind", 463 + (state.mode ? Math.sin(state.headPhase) * 55 : 0), 285, wind);
-    if (device.id === "ac") emitToward(Math.random() < .55 ? "fog" : "wind", 395, 282, wind, .9);
-    if (device.id === "dryer") emitToward(state.mode ? (Math.random() < .28 ? "spark" : "hotwind") : (Math.random() < .26 ? "snow" : "wind"), 540, 280, wind, 1.12);
-    if (device.id === "handfan") emitToward("wind", 470, 290, wind, 1.05);
+  cel(leaf, C.sage, 5, {seed:1310, amp:2.2});
+  cel(leaf.map(p => [p[0]*.86, -212 + (p[1]+212)*.86]), "#a3bd7f", 0, {seed:1314, amp:1.8});
+  for (let i = 0; i < 9; i++){                                                // ribs
+    const th = -2.62 + i*.42;
+    taperLine([[0,-112],[Math.cos(th)*70, -212 + Math.sin(th)*84], [Math.cos(th)*96, -212 + Math.sin(th)*114]],
+              5, 1.6, "rgba(95,64,40,.55)", .8, 1320+i);
   }
-  if (device.id === "ac" && state.level > .2 && Math.random() < dt * state.level * 2.2) emit("drop", 535 + Math.random() * 70, 408, (Math.random() - .5) * 12, 65 + Math.random() * 45, 1.1, .8);
-  for (const particle of state.particles) {
-    particle.age += dt;
-    const depth = particle.toward ? 1 + Math.pow(particle.age / particle.life, 1.7) * 4.5 : 1;
-    particle.x += particle.vx * depth * dt;
-    particle.y += particle.vy * depth * dt;
-    if (particle.toward) particle.size += dt * (1.2 + particle.wind * 2.1);
-    if (!particle.toward && ["leaf", "sweat", "drop", "spark", "snow"].includes(particle.kind)) particle.vy += 55 * dt;
-    particle.phase += particle.spin * dt;
+  taperLine([[0,-108],[0,-142]], 15, 9, C.brownDk, .6, 1340);                 // binding
+  g.restore();
+}
+
+// ── what each appliance throws at you ───────────────────────────────────────
+// Every outlet faces the lens, so air leaves radially and accelerates as it
+// approaches. Where the outlet is and which arc it covers is all that differs.
+function outletOf(d, lv){
+  if (d.id === "fan"){
+    const sweep = S.pin ? Math.sin(S.headPhase)*.62 : 0;
+    return {x:FAN.bx + Math.sin(sweep)*20, y:FAN.hy, a0:0, a1:Math.PI*2, r0:FAN.cage*.32, swirl:1.15};
   }
-  state.particles = state.particles.filter((particle) => particle.age < particle.life && particle.x > -80 && particle.x < 1060 && particle.y > -80 && particle.y < 680);
+  if (d.id === "ac")    return {x:AC.x + AC.w/2, y:AC.y + AC.h - 6, a0:.04, a1:Math.PI-.04, r0:40, swirl:.30};
+  if (d.id === "dryer") return {x:DRY.cx, y:DRY.cy, a0:0, a1:Math.PI*2, r0:52, swirl:1.95};
+  return {x:S.handX, y:HAND.leafY, a0:0, a1:Math.PI*2, r0:70, swirl:.55};
 }
 
-function resetCanvas(ctx, canvas) {
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.globalAlpha = 1;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-}
+function emitFor(dt, lv){
+  const d = S.dev;
+  if (lv < .04 || d.manual) return;
+  const o = outletOf(d, lv);
+  const tight = d.id === "dryer";                       // a nozzle is a narrow, fast jet
 
-function ink(ctx, width = 6) {
-  ctx.strokeStyle = "#30241f";
-  ctx.lineWidth = width;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-}
-
-function paintedShape(ctx, fill, width = 6) {
-  ctx.fillStyle = fill;
-  ink(ctx, width);
-  ctx.fill();
-  ctx.stroke();
-}
-
-function drawRoom(ctx, device, time) {
-  const coolAmount = clamp((AMBIENT_TEMPERATURE - state.temperature) / 18, 0, 1);
-  const hot = device.id === "dryer" && state.mode && state.actionLevel > .05;
-  const wall = hot ? "#e8a07d" : lerpColor("#b9d5c7", "#cbe4df", coolAmount);
-  ctx.fillStyle = wall;
-  ctx.fillRect(0, 0, 960, 455);
-  ctx.fillStyle = "rgba(255,244,204,.21)";
-  for (let x = -40; x < 1000; x += 74) {
-    ctx.beginPath();
-    for (let y = 0; y <= 455; y += 34) ctx.lineTo(x + Math.sin(y * .035) * 7, y);
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = "rgba(70,87,70,.12)";
-    ctx.stroke();
+  const rate = (tight ? 62 : 46) * lv * dt;
+  let n = Math.floor(rate) + (Math.random() < rate%1 ? 1 : 0);
+  while (n-- > 0){
+    const ang = lerp(o.a0, o.a1, Math.random());
+    spawn({k:"gust", ox:o.x, oy:o.y, ang, r:o.r0*(.7 + .6*Math.random()),
+           v:(tight ? 210 : 120) + (tight ? 640 : 430)*lv, accel:tight ? 2.5 : 1.85,
+           swirl:o.swirl * (.7 + .6*Math.random()), a:.62 + .38*Math.random(),
+           w:2.6 + 3.4*Math.random(), max:1.5,
+           c:d.id === "dryer" ? (S.mode ? "rgba(150,44,31,.5)" : "rgba(74,110,124,.55)") : undefined,
+           hi:Math.random() < .38});
   }
-  ctx.fillStyle = "#b97a51";
-  ctx.fillRect(0, 455, 960, 145);
-  ctx.fillStyle = "#e4c889";
-  ctx.fillRect(0, 438, 960, 21);
-  ink(ctx, 5); ctx.beginPath(); ctx.moveTo(0, 455); ctx.lineTo(960, 455); ctx.stroke();
-  ctx.strokeStyle = "rgba(76,45,30,.2)"; ctx.lineWidth = 3;
-  for (let x = -50; x < 1050; x += 95) { ctx.beginPath(); ctx.moveTo(x, 600); ctx.lineTo(x + 58, 455); ctx.stroke(); }
 
-  ctx.save(); ctx.translate(105, 110); ctx.rotate(-.02);
-  ctx.fillStyle = "#f0dfb4"; ink(ctx, 5); ctx.beginPath(); ctx.roundRect(-45, -58, 160, 150, 7); ctx.fill(); ctx.stroke();
-  ctx.fillStyle = "#7eb3c1"; ctx.fillRect(-26, -39, 122, 112); ctx.strokeRect(-26, -39, 122, 112);
-  ctx.strokeStyle = "#30241f"; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(35, -39); ctx.lineTo(35, 73); ctx.moveTo(-26, 17); ctx.lineTo(96, 17); ctx.stroke();
-  ctx.fillStyle = "rgba(255,244,204,.55)"; ctx.beginPath(); ctx.arc(15, -2, 18, 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
-
-  ctx.fillStyle = "rgba(73,45,30,.16)";
-  ctx.beginPath(); ctx.ellipse(485, 490, 245 + state.actionLevel * 18, 31 - state.actionLevel * 3, 0, 0, Math.PI * 2); ctx.fill();
-  for (const dot of grain) { ctx.globalAlpha = dot.a; ctx.fillStyle = dot.x % 2 ? "#3d2a22" : "#fff7da"; ctx.beginPath(); ctx.arc(dot.x, dot.y, dot.r, 0, Math.PI * 2); ctx.fill(); }
-  ctx.globalAlpha = 1;
-}
-
-function lerpColor(a, b, t) {
-  const pa = a.match(/\w\w/g).map((x) => parseInt(x, 16));
-  const pb = b.match(/\w\w/g).map((x) => parseInt(x, 16));
-  return `rgb(${pa.map((v, i) => Math.round(lerp(v, pb[i], t))).join(",")})`;
-}
-
-function drawRotor(ctx, device, radius, blades, blur = false) {
-  ctx.save();
-  ctx.rotate(state.rotorAngle);
-  if (blur && state.actionLevel > .58) {
-    ctx.strokeStyle = `${device.palette.main}77`;
-    ctx.lineWidth = 18 + state.actionLevel * 11;
-    ctx.setLineDash([42, 16]);
-    ctx.beginPath(); ctx.arc(0, 0, radius * .77, 0, Math.PI * 2); ctx.stroke();
-    ctx.setLineDash([]);
+  S.ringT += dt * lv * (tight ? 2.6 : 1.5);             // the expanding blast arcs
+  if (S.ringT > 1){
+    S.ringT = 0;
+    spawn({k:"ring", ox:o.x, oy:o.y, ang:0, r:o.r0, v:150 + 300*lv, accel:1.7, max:1.5,
+           s:Math.random()*99, c:d.id === "dryer" && S.mode ? "rgba(150,44,31,.4)" : undefined});
+    S.camKick = Math.min(1.6, S.camKick + .55*lv);      // it also knocks the camera
   }
-  for (let index = 0; index < blades; index++) {
-    ctx.save(); ctx.rotate(index / blades * Math.PI * 2);
-    ctx.beginPath();
-    ctx.moveTo(7, -5);
-    ctx.bezierCurveTo(radius * .25, -radius * .35, radius * .85, -radius * .28, radius * .88, -radius * .05);
-    ctx.bezierCurveTo(radius * .78, radius * .14, radius * .28, radius * .17, 8, 7);
-    ctx.closePath(); paintedShape(ctx, device.palette.main, 4); ctx.restore();
+
+  S.flyT += dt * lv * .95;                              // litter blown past your head
+  if (S.flyT > 1){
+    S.flyT = 0;
+    const leaf = Math.random() < .5;
+    spawn({k:"fly", ox:o.x, oy:o.y, ang:lerp(o.a0, o.a1, Math.random()),
+           r:o.r0 + 30*Math.random(), v:130 + 280*lv, accel:1.9, max:1.6,
+           r0:leaf ? 13 : 5, leaf, spin:Math.random()*6, dspin:(Math.random()*2-1)*4,
+           c:leaf ? (Math.random() < .5 ? C.sage : C.mustard) : undefined});
   }
-  ctx.beginPath(); ctx.arc(0, 0, Math.max(8, radius * .13), 0, Math.PI * 2); paintedShape(ctx, device.palette.trim, 4);
-  ctx.restore();
-}
 
-function drawFan(ctx, device, time) {
-  const high = Math.max(0, state.actionLevel - .55);
-  const shake = high * high * 12;
-  const headSweep = state.mode ? Math.sin(state.headPhase) * 55 : 0;
-  ctx.save();
-  ctx.translate(463 + headSweep + Math.sin(time * 39) * shake, 285 + Math.cos(time * 33) * shake * .28);
-  ctx.scale(1 + Math.sin(time * 20) * high * .028, 1 - Math.sin(time * 20) * high * .022);
-
-  ctx.beginPath(); ctx.roundRect(-13, 118, 26, 146, 10); paintedShape(ctx, "#d8b76f", 6);
-  ctx.beginPath(); ctx.ellipse(0, 269, 118, 29, 0, 0, Math.PI * 2); paintedShape(ctx, "#c89a55", 7);
-  ctx.fillStyle = "#e9c879"; ctx.beginPath(); ctx.ellipse(-18, 261, 55, 9, -.08, 0, Math.PI * 2); ctx.fill();
-
-  ctx.save(); ctx.translate(0, 0);
-  ctx.beginPath(); ctx.arc(0, 0, 137, 0, Math.PI * 2); paintedShape(ctx, device.palette.pale, 8);
-  drawRotor(ctx, device, 108, device.blades, true);
-  ink(ctx, 3); ctx.strokeStyle = "rgba(48,36,31,.65)";
-  for (let r = 36; r <= 124; r += 22) { ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke(); }
-  for (let i = 0; i < 16; i++) { ctx.save(); ctx.rotate(i / 16 * Math.PI * 2); ctx.beginPath(); ctx.moveTo(23, 0); ctx.lineTo(130, 0); ctx.stroke(); ctx.restore(); }
-  ctx.beginPath(); ctx.arc(0, 0, 137, 0, Math.PI * 2); ink(ctx, 8); ctx.stroke();
-  ctx.restore();
-
-  const pinY = state.mode ? -166 : -145;
-  ctx.beginPath(); ctx.roundRect(-10, pinY, 20, 37, 8); paintedShape(ctx, "#d5a83e", 5);
-  ctx.beginPath(); ctx.ellipse(0, pinY, 19, 10, 0, 0, Math.PI * 2); paintedShape(ctx, "#e7c461", 4);
-
-  // The ribbon grows wider as it drops toward the bottom edge: a foreshortened cue that the air is coming out of the screen.
-  const ribbonWave = state.actionLevel * 15;
-  const ribbonSwing = Math.sin(time * 8.5) * ribbonWave;
-  ctx.beginPath(); ctx.arc(122, -57, 10, 0, Math.PI * 2); paintedShape(ctx, device.palette.trim, 4);
-  ctx.beginPath();
-  ctx.moveTo(127, -61);
-  ctx.bezierCurveTo(151 + ribbonSwing, -44, 126 - ribbonSwing * .35, -6, 158 + ribbonSwing * .6, 24);
-  ctx.bezierCurveTo(187 - ribbonSwing * .45, 55, 168 + ribbonSwing, 85, 201 + ribbonSwing * .6, 119);
-  ctx.lineTo(182 + ribbonSwing * .5, 137);
-  ctx.lineTo(165 + ribbonSwing * .42, 111);
-  ctx.bezierCurveTo(141 + ribbonSwing * .55, 79, 157 - ribbonSwing * .4, 54, 137 + ribbonSwing * .45, 34);
-  ctx.bezierCurveTo(111 - ribbonSwing * .35, 6, 137 + ribbonSwing * .35, -31, 118, -49);
-  ctx.closePath(); paintedShape(ctx, device.palette.trim, 5);
-  ctx.fillStyle = "rgba(255,236,190,.24)"; ctx.beginPath(); ctx.ellipse(170 + ribbonSwing * .45, 81, 7, 30, -.52, 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
-}
-
-function drawAC(ctx, device, time) {
-  const shake = state.level * state.compressorMix * 3.5;
-  ctx.save(); ctx.translate(485 + Math.sin(time * 31) * shake, 280 + Math.cos(time * 27) * shake * .35);
-  ctx.beginPath(); ctx.roundRect(-275, -150, 550, 300, 30); paintedShape(ctx, device.palette.main, 9);
-  ctx.beginPath(); ctx.roundRect(-244, -116, 308, 218, 15); paintedShape(ctx, "#6f8378", 6);
-  ctx.fillStyle = "#d8dcc0"; ctx.strokeStyle = "#30241f"; ctx.lineWidth = 3;
-  for (let y = -94; y <= 80; y += 18) { for (let x = -222; x <= 38; x += 25) { ctx.beginPath(); ctx.roundRect(x, y, 15, 6, 3); ctx.fill(); ctx.stroke(); } }
-  ctx.beginPath(); ctx.roundRect(92, -112, 148, 205, 17); paintedShape(ctx, device.palette.pale, 6);
-  ctx.beginPath(); ctx.arc(139, -63, 28, 0, Math.PI * 2); paintedShape(ctx, "#e7bd61", 5);
-  ctx.beginPath(); ctx.arc(197, -63, 28, 0, Math.PI * 2); paintedShape(ctx, "#e7bd61", 5);
-  ink(ctx, 4); ctx.beginPath(); ctx.moveTo(139, -63); ctx.lineTo(151, -77); ctx.moveTo(197, -63); ctx.lineTo(186, -79); ctx.stroke();
-  ctx.fillStyle = state.mode ? "#79ad6e" : "#5a483b"; ink(ctx, 3); ctx.beginPath(); ctx.arc(143, 38, 9, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-  ctx.fillStyle = state.compressorMix > .5 ? "#d95745" : "#745c4a"; ctx.beginPath(); ctx.arc(194, 38, 9, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-
-  const louverAngle = Math.sin(state.headPhase * 1.4) * (state.level * .24);
-  ctx.save(); ctx.translate(-90, 123); ctx.rotate(louverAngle); ink(ctx, 5);
-  for (let x = -145; x <= 145; x += 42) { ctx.beginPath(); ctx.moveTo(x, -14); ctx.lineTo(x + 17, 18); ctx.stroke(); }
-  ctx.restore();
-  ctx.restore();
-}
-
-function drawDryer(ctx, device, time) {
-  const high = Math.max(0, state.actionLevel - .58);
-  const shake = high * 9;
-  ctx.save(); ctx.translate(455 + Math.sin(time * 46) * shake, 280 + Math.cos(time * 39) * shake * .3); ctx.rotate(-.035);
-  // The body recedes to the left while the oversized nozzle points out of the screen.
-  ctx.beginPath(); ctx.moveTo(-205, -71); ctx.quadraticCurveTo(-128, -113, 37, -91); ctx.lineTo(91, -61); ctx.lineTo(91, 61); ctx.lineTo(37, 91); ctx.quadraticCurveTo(-128, 113, -205, 71); ctx.closePath(); paintedShape(ctx, device.palette.main, 8);
-  ctx.beginPath(); ctx.ellipse(-181, 0, 43, 56, 0, 0, Math.PI * 2); paintedShape(ctx, device.palette.pale, 6);
-  ink(ctx, 3); for (let i = -3; i <= 3; i++) { ctx.beginPath(); ctx.moveTo(-198 + i * 7, -33); ctx.lineTo(-186 + i * 7, 34); ctx.stroke(); }
-
-  ctx.beginPath(); ctx.moveTo(-43, 72); ctx.lineTo(18, 76); ctx.lineTo(1, 242); ctx.quadraticCurveTo(-28, 267, -62, 237); ctx.closePath(); paintedShape(ctx, "#d1a359", 8);
-  ctx.beginPath(); ctx.roundRect(-39, 111, 35, 48, 13); paintedShape(ctx, state.mode ? "#e76b43" : "#7eb6c0", 4);
-  ctx.beginPath(); ctx.moveTo(-28, 242); ctx.bezierCurveTo(-4, 286, 76, 266, 101, 307); ink(ctx, 6); ctx.stroke();
-
-  if (state.level > .05) {
-    ctx.globalAlpha = state.mode ? .28 + state.actionLevel * .18 : .13;
-    ctx.fillStyle = state.mode ? "#ed7449" : "#d9f3ee";
-    ctx.beginPath(); ctx.ellipse(86, 0, 111 + state.actionLevel * 24, 136 + state.actionLevel * 22, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.globalAlpha = 1;
-  }
-  ctx.beginPath(); ctx.ellipse(86, 0, 104, 127, 0, 0, Math.PI * 2); paintedShape(ctx, device.palette.trim, 9);
-  ctx.beginPath(); ctx.ellipse(86, 0, 72, 91, 0, 0, Math.PI * 2); paintedShape(ctx, "#40372f", 6);
-  const tunnel = ctx.createRadialGradient(72, -19, 4, 86, 0, 72);
-  tunnel.addColorStop(0, state.mode ? "#f69b64" : "#e8fbf6");
-  tunnel.addColorStop(.55, state.mode ? "#b6473b" : "#7eb7c0");
-  tunnel.addColorStop(1, "#342923");
-  ctx.fillStyle = tunnel; ctx.beginPath(); ctx.ellipse(86, 0, 59, 76, 0, 0, Math.PI * 2); ctx.fill();
-  ink(ctx, 3); ctx.stroke();
-  ctx.fillStyle = "rgba(255,255,230,.28)"; ctx.beginPath(); ctx.ellipse(65, -27, 20, 36, -.3, 0, Math.PI * 2); ctx.fill();
-  if (state.level > .05) {
-    ctx.fillStyle = "#f7e8ba"; ctx.font = "italic 900 19px Georgia"; ctx.textAlign = "center";
-    ctx.fillText(state.mode ? "HOT!" : "B-R-R-R!", 86, 7);
-  }
-  ctx.restore();
-}
-
-function drawHandFan(ctx, device, time) {
-  const automatic = Math.sin(state.flapPhase) * lerp(.18, .72, state.level);
-  const aim = state.pointerAim * .32;
-  const burst = Math.sin(state.manualBurst * Math.PI) * .55;
-  ctx.save(); ctx.translate(455, 340); ctx.rotate(-.18 + automatic + aim + burst);
-  ctx.beginPath();
-  ctx.moveTo(-18, 70);
-  ctx.bezierCurveTo(-185, -28, -198, -215, -43, -247);
-  ctx.bezierCurveTo(42, -265, 126, -206, 112, -118);
-  ctx.bezierCurveTo(103, -60, 50, 14, 18, 72);
-  ctx.closePath(); paintedShape(ctx, device.palette.main, 9);
-  ctx.fillStyle = "rgba(255,239,175,.18)"; ctx.beginPath(); ctx.ellipse(-55, -125, 83, 121, -.4, 0, Math.PI * 2); ctx.fill();
-  ink(ctx, 4); ctx.strokeStyle = "#5f6e45";
-  for (let i = -3; i <= 3; i++) { ctx.beginPath(); ctx.moveTo(0, 63); ctx.quadraticCurveTo(i * 34, -90, i * 25 - 28, -218); ctx.stroke(); }
-  ctx.beginPath(); ctx.moveTo(0, 62); ctx.lineTo(-55, 230); paintedShape(ctx, "#d19b4e", 8);
-  ctx.beginPath(); ctx.roundRect(-70, 207, 42, 87, 18); paintedShape(ctx, "#c4843d", 7);
-  ctx.restore();
-  if (state.actionLevel > .65) {
-    ctx.fillStyle = "#30241f"; ctx.font = "italic 900 22px Georgia";
-    ctx.save(); ctx.translate(650, 175); ctx.rotate(-.08); ctx.fillText("FLAP!", 0, 0); ctx.restore();
-  }
-}
-
-function drawParticles(ctx) {
-  for (const p of state.particles) {
-    const alpha = Math.max(0, 1 - p.age / p.life);
-    ctx.save(); ctx.globalAlpha = alpha; ctx.translate(p.x, p.y); ctx.rotate(p.phase); ctx.scale(p.size, p.size);
-    if (["wind", "hotwind"].includes(p.kind)) {
-      ctx.beginPath(); ctx.moveTo(-30, 0); ctx.bezierCurveTo(-12, -9, 10, 8, 34, 0); ctx.lineCap = "round";
-      ctx.strokeStyle = "#30241f"; ctx.lineWidth = 7; ctx.stroke();
-      ctx.strokeStyle = p.kind === "hotwind" ? "#f4a26e" : "#f7f2d7"; ctx.lineWidth = 4; ctx.stroke();
-    } else if (p.kind === "fog") {
-      ctx.fillStyle = "rgba(246,252,238,.82)"; ink(ctx, 2); ctx.beginPath(); ctx.arc(-9, 2, 12, 0, Math.PI * 2); ctx.arc(4, -5, 17, 0, Math.PI * 2); ctx.arc(20, 3, 11, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-    } else if (p.kind === "spark") {
-      ctx.fillStyle = "#f1b642"; ink(ctx, 3); ctx.beginPath(); ctx.moveTo(0,-10); ctx.lineTo(3,-3); ctx.lineTo(11,0); ctx.lineTo(3,3); ctx.lineTo(0,11); ctx.lineTo(-3,3); ctx.lineTo(-10,0); ctx.lineTo(-3,-3); ctx.closePath(); ctx.fill(); ctx.stroke();
-    } else if (p.kind === "snow") {
-      ctx.strokeStyle = "#eefcf7"; ctx.lineWidth = 4; for (let i = 0; i < 3; i++) { ctx.rotate(Math.PI / 3); ctx.beginPath(); ctx.moveTo(-9,0); ctx.lineTo(9,0); ctx.stroke(); }
-    } else if (p.kind === "drop" || p.kind === "sweat") {
-      ctx.fillStyle = "#70bfd0"; ink(ctx, 3); ctx.beginPath(); ctx.moveTo(0,-12); ctx.bezierCurveTo(12,2,8,13,0,14); ctx.bezierCurveTo(-8,13,-12,2,0,-12); ctx.fill(); ctx.stroke();
-    } else if (p.kind === "leaf") {
-      ctx.fillStyle = p.x % 2 > 1 ? "#7ca267" : "#d59b4a"; ink(ctx, 3); ctx.beginPath(); ctx.moveTo(-13,0); ctx.quadraticCurveTo(0,-12,14,0); ctx.quadraticCurveTo(0,12,-13,0); ctx.fill(); ctx.stroke();
+  if (d.id === "ac"){
+    const cold = !S.mode;
+    const mr = (cold ? 11 : 4)*lv*dt;                   // cold air rolling over the lens
+    let k = Math.floor(mr) + (Math.random() < mr%1 ? 1 : 0);
+    while (k-- > 0){
+      spawn({k:"mist", x:AC.x + 40 + Math.random()*(AC.w-80), y:AC.y + AC.h - 4,
+             vx:(Math.random()*2-1)*90, vy:56 + 130*Math.random(),
+             r:14 + 16*Math.random(), grow:44, max:1.6 + Math.random()*1.2, a:.42});
     }
-    ctx.restore();
+    S.dripT += dt * lv * (S.mode ? 2.0 : 1) * d.dripRate;
+    if (S.dripT > 1){
+      S.dripT = 0;
+      spawn({k:"drop", x:AC.x + 70 + Math.random()*(AC.w-140), y:AC.y + AC.h + 4,
+             vx:(Math.random()*2-1)*12, vy:20, r:7, max:3.2});
+      if (AU) drip();
+      puddle = Math.min(1.6, puddle + .06);
+    }
+  }
+
+  if (d.id === "dryer"){
+    const fx = (S.mode ? 22 : 15)*lv*dt;
+    let m = Math.floor(fx) + (Math.random() < fx%1 ? 1 : 0);
+    while (m-- > 0){
+      const ang = Math.random()*Math.PI*2;
+      if (S.mode) spawn({k:"spark", x:DRY.cx + Math.cos(ang)*60, y:DRY.cy + Math.sin(ang)*54,
+                         vx:Math.cos(ang)*(300+520*lv), vy:Math.sin(ang)*(260+440*lv) - 60,
+                         r:2.6 + 3.0*Math.random(), max:.55 + Math.random()*.55,
+                         c:Math.random() < .4 ? C.hot : C.ember});
+      else spawn({k:"ice", x:DRY.cx + Math.cos(ang)*60, y:DRY.cy + Math.sin(ang)*54,
+                  vx:Math.cos(ang)*(260+420*lv), vy:Math.sin(ang)*(230+360*lv),
+                  r:5 + 4*Math.random(), spin:Math.random()*3, dspin:(Math.random()*2-1)*7,
+                  max:.8 + Math.random()*.6});
+    }
   }
 }
 
-function airSource(device) {
-  if (device.id === "fan") return { x: 463 + (state.mode ? Math.sin(state.headPhase) * 55 : 0), y: 285, oval: .78 };
-  if (device.id === "ac") return { x: 395, y: 282, oval: .58 };
-  if (device.id === "dryer") return { x: 540, y: 280, oval: 1.18 };
-  return { x: 470, y: 290, oval: .72 };
+// Fired once per swing of the hand fan, at the fastest part of the stroke.
+function handSwing(strength){
+  const px = S.handX, py = HAND.leafY;
+  const dir = S.swingSign > 0 ? -.16 : Math.PI + .16;
+  if (AU) whoosh(clamp(strength, 0, 1));
+  // most of a swing throws air forward, at you; the rest wipes across the frame
+  for (let i = 0; i < 12 + Math.round(20*strength); i++){
+    spawn({k:"gust", ox:px, oy:py, ang:Math.random()*Math.PI*2,
+           r:66 + 40*Math.random(), v:150 + 520*strength, accel:2.0,
+           swirl:S.swingSign * .8 * (.6 + .7*Math.random()), a:.6 + .4*Math.random(),
+           w:2.6 + 3.6*Math.random(), max:1.4, hi:Math.random() < .38});
+  }
+  spawn({k:"ring", ox:px, oy:py, ang:0, r:74, v:190 + 320*strength, accel:1.8, max:1.4, s:Math.random()*99});
+  S.camKick = Math.min(1.6, S.camKick + .5*strength);
+  for (let i = 0; i < 5 + Math.round(7*strength); i++){
+    const a = dir + (Math.random()*2-1)*.24, sp = 300 + 600*strength;
+    spawn({k:"wind", x:px + Math.cos(dir)*112, y:py + (Math.random()*2-1)*92,
+           vx:Math.cos(a)*sp, vy:Math.sin(a)*sp*.4 + 24,
+           max:.45 + Math.random()*.5, w:2.4 + 4*Math.random(), bow:(Math.random()*2-1), a:.8,
+           hi:Math.random() < .38});
+  }
+  if (strength > .45 && Math.random() < .5)                       // droplets flung off the rim
+    for (let i = 0; i < 2; i++)
+      spawn({k:"sweat", x:px + Math.cos(dir)*96, y:py - 60 + Math.random()*120,
+             vx:Math.cos(dir)*(200+300*strength), vy:-180 - 160*Math.random(),
+             r:6, max:2.6});
+  if (Math.random() < .5)
+    spawn({k:"fly", ox:px, oy:py, ang:Math.random()*Math.PI*2, r:80, v:150 + 240*strength,
+           accel:1.9, max:1.6, r0:13, leaf:true, spin:Math.random()*6, dspin:(Math.random()*2-1)*4,
+           c:Math.random() < .5 ? C.sage : C.mustard});
 }
 
-function drawTowardViewerGust(ctx, device, time) {
-  const wind = state.actionLevel;
-  if (wind < .025 || state.reducedMotion) return;
-  const source = airSource(device);
-  const hot = device.id === "dryer" && state.mode;
-  const color = hot ? "244,142,91" : "244,248,224";
-  const cycles = 5;
+// ── tab artwork ─────────────────────────────────────────────────────────────
+// Small SVGs rather than canvas, so the tabs stay crisp at any zoom. Each one is
+// grouped by part: chassis, moving bits, then the ink line on top.
+const ICONS = {
+  fan:
+   '<svg viewBox="0 0 32 32" aria-hidden="true">' +
+     '<g stroke="#241a12" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+       '<g id="fan-stand" fill="none"><path d="M11 29.5h10M16 29.5V24"/></g>' +
+       '<g id="fan-cage"><circle cx="16" cy="13.5" r="9.6" fill="#f9f2df"/></g>' +
+       '<g id="fan-blades" fill="#c4402e">' +
+         '<path d="M16 13.5 21.8 6.6a7.2 7.2 0 0 1 1.4 7.6Z"/>' +
+         '<path d="M16 13.5 22.6 18a7.2 7.2 0 0 1-7 3Z"/>' +
+         '<path d="M16 13.5 8.4 17a7.2 7.2 0 0 1 1.9-9Z"/>' +
+       '</g>' +
+       '<g id="fan-hub"><circle cx="16" cy="13.5" r="2.3" fill="#e4ae3a"/></g>' +
+     '</g></svg>',
+  ac:
+   '<svg viewBox="0 0 32 32" aria-hidden="true">' +
+     '<g stroke="#241a12" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+       '<g id="ac-body"><rect x="3.5" y="6.5" width="25" height="13" rx="2.6" fill="#f9f2df"/></g>' +
+       '<g id="ac-grille" fill="none" stroke-width="1.5" opacity=".55">' +
+         '<path d="M7 9v6M11 9v6M15 9v6M19 9v6M23 9v6"/></g>' +
+       '<g id="ac-louver" fill="#cfae76"><rect x="6" y="20.5" width="20" height="2.6" rx="1.3"/></g>' +
+       '<g id="ac-air" fill="none" stroke="#7cb4c6" stroke-width="2">' +
+         '<path d="M10 26q3 2.4 6 0t6 0"/></g>' +
+       '<g id="ac-lamp"><circle cx="24.5" cy="10.5" r="1.6" fill="#7cb4c6"/></g>' +
+     '</g></svg>',
+  dryer:
+   '<svg viewBox="0 0 32 32" aria-hidden="true">' +
+     '<g stroke="#241a12" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+       '<g id="dryer-handle" fill="#962c1f"><path d="M9.5 17.5 7 28h6l2-9.5Z"/></g>' +
+       '<g id="dryer-barrel"><rect x="4.5" y="6.5" width="17" height="11" rx="5.5" fill="#c4402e"/></g>' +
+       '<g id="dryer-nozzle" fill="#e2603c"><path d="M21.5 6.6 27.5 4.6v14.8l-6-2Z"/></g>' +
+       '<g id="dryer-intake" fill="#ebdfc2"><circle cx="6.8" cy="12" r="2.6"/></g>' +
+     '</g></svg>',
+  hand:
+   '<svg viewBox="0 0 32 32" aria-hidden="true">' +
+     '<g stroke="#241a12" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+       '<g id="hand-handle" fill="#8a5f3c"><path d="M14.6 20.5h2.8l.7 9h-4.2Z"/></g>' +
+       '<g id="hand-leaf"><ellipse cx="16" cy="12" rx="9.4" ry="9" fill="#90a96d"/></g>' +
+       '<g id="hand-ribs" fill="none" stroke-width="1.4" opacity=".5">' +
+         '<path d="M16 20.5 9 7.6M16 20.5V4M16 20.5 23 7.6"/></g>' +
+     '</g></svg>',
+};
 
-  // Broken expanding rings read as air travelling along the camera axis, not across the room.
-  for (let index = 0; index < cycles; index++) {
-    const progress = (time * (.42 + wind * .48) + index / cycles) % 1;
-    const eased = progress * progress;
-    const radius = 24 + eased * (330 + wind * 150);
-    const alpha = Math.sin(progress * Math.PI) * (.08 + wind * .22);
-    ctx.save();
-    ctx.translate(source.x, source.y);
-    ctx.scale(1, source.oval + eased * .22);
-    ctx.rotate(Math.sin(time * 1.7 + index) * .035);
-    ctx.setLineDash([42 + index * 7, 19 + index * 3]);
-    ctx.lineDashOffset = -time * (34 + wind * 64);
-    ctx.strokeStyle = `rgba(48,36,31,${alpha * .72})`;
-    ctx.lineWidth = 9 + eased * 10;
-    ctx.beginPath(); ctx.arc(0, 0, radius, -.86, 3.95); ctx.stroke();
-    ctx.strokeStyle = `rgba(${color},${alpha})`;
-    ctx.lineWidth = 5 + eased * 8;
-    ctx.stroke();
-    ctx.restore();
-  }
+// ── interface ───────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const tabsEl = $("tabs"), keysEl = $("keys");
 
-  // Radial speed strokes flare into the foreground and make the browser edge feel like the destination.
-  const rayCount = 13;
-  for (let index = 0; index < rayCount; index++) {
-    const angle = index / rayCount * Math.PI * 2 + Math.sin(index * 9.2) * .08;
-    const progress = (time * (.65 + wind * .75) + index * .137) % 1;
-    const near = 46 + progress * progress * 385;
-    const far = near + 30 + progress * 82;
-    const squash = .68;
-    ctx.beginPath();
-    ctx.moveTo(source.x + Math.cos(angle) * near, source.y + Math.sin(angle) * near * squash);
-    ctx.quadraticCurveTo(
-      source.x + Math.cos(angle + .025) * (near + far) * .52,
-      source.y + Math.sin(angle + .025) * (near + far) * .52 * squash,
-      source.x + Math.cos(angle) * far,
-      source.y + Math.sin(angle) * far * squash
-    );
-    ctx.lineCap = "round";
-    ctx.strokeStyle = `rgba(48,36,31,${(.04 + wind * .13) * (1 - progress * .42)})`;
-    ctx.lineWidth = 7 + progress * 10;
-    ctx.stroke();
-    ctx.strokeStyle = `rgba(${color},${(.08 + wind * .28) * (1 - progress * .42)})`;
-    ctx.lineWidth = 3 + progress * 7;
-    ctx.stroke();
-  }
-
-  if (wind > .34) {
-    const pop = clamp((wind - .34) * 2.2, 0, 1);
-    ctx.save();
-    ctx.translate(785, 82); ctx.rotate(-.08);
-    ctx.globalAlpha = pop * (.76 + Math.sin(time * 7) * .08);
-    ctx.fillStyle = hot ? "#d94f43" : "#f5e5a9";
-    ctx.strokeStyle = "#30241f"; ctx.lineWidth = 5;
-    ctx.beginPath(); ctx.roundRect(-125, -29, 250, 58, 18); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = "#30241f"; ctx.font = "italic 900 23px Georgia"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText(hot ? "HOT BLAST—AT YOU!" : "WHOOSH—AT YOU!", 0, 1);
-    ctx.restore();
-  }
-}
-
-function drawScene(time) {
-  resetCanvas(scene, ui.sceneCanvas);
-  const device = currentDevice();
-  drawRoom(scene, device, time);
-  const high = Math.max(0, state.actionLevel - .68);
-  scene.save();
-  scene.translate(480, 300);
-  scene.scale(1 + Math.sin(time * 19) * high * .012, 1 - Math.sin(time * 19) * high * .009);
-  scene.translate(-480, -300);
-  ({ fan: drawFan, ac: drawAC, dryer: drawDryer, handfan: drawHandFan })[device.renderer](scene, device, time);
-  scene.restore();
-  drawParticles(scene);
-  drawTowardViewerGust(scene, device, time);
-}
-
-function drawSoundMeter(time) {
-  resetCanvas(meter, ui.soundMeter);
-  meter.fillStyle = "#ecd6a3"; meter.fillRect(0, 0, 320, 105);
-  ink(meter, 3); meter.beginPath(); meter.moveTo(22, 78); meter.quadraticCurveTo(160, -35, 298, 78); meter.stroke();
-  meter.fillStyle = "#30241f"; meter.font = "900 10px Georgia"; meter.textAlign = "center"; meter.fillText("RACKET-O-METER", 160, 96);
-  for (let i = 0; i <= 8; i++) {
-    const angle = lerp(Math.PI * .84, Math.PI * .16, i / 8);
-    const x1 = 160 + Math.cos(angle) * 112, y1 = 82 - Math.sin(angle) * 77;
-    const x2 = 160 + Math.cos(angle) * 101, y2 = 82 - Math.sin(angle) * 69;
-    meter.beginPath(); meter.moveTo(x1,y1); meter.lineTo(x2,y2); meter.lineWidth = i % 2 ? 2 : 4; meter.stroke();
-  }
-  const wave = audio.getWaveform();
-  let amplitude = state.actionLevel * .72;
-  if (wave) {
-    let sum = 0;
-    for (let i = 0; i < wave.length; i += 8) { const v = (wave[i] - 128) / 128; sum += v * v; }
-    amplitude = clamp(Math.sqrt(sum / (wave.length / 8)) * 3.8, 0, 1);
-  }
-  const needleAngle = lerp(Math.PI * .82, Math.PI * .18, amplitude);
-  meter.save(); meter.translate(160,82); meter.rotate(-needleAngle + Math.PI / 2); meter.fillStyle = "#d94f43"; ink(meter, 3); meter.beginPath(); meter.moveTo(-5,4); meter.lineTo(0,-76); meter.lineTo(5,4); meter.closePath(); meter.fill(); meter.stroke(); meter.restore();
-  meter.beginPath(); meter.arc(160,82,10,0,Math.PI*2); paintedShape(meter,"#e0a94a",3);
-}
-
-function updateFeedback() {
-  const chill = clamp((AMBIENT_TEMPERATURE - state.temperature) / (AMBIENT_TEMPERATURE - FREEZE_TEMPERATURE), 0, 1);
-  const drop = chill * 88;
-  ui.temperatureValue.textContent = state.temperature.toFixed(1);
-  ui.mercury.style.setProperty("--mercury-drop", `${drop}%`);
-  ui.chillFill.style.width = `${Math.round(chill * 100)}%`;
-  ui.chillScore.textContent = `${Math.round(chill * 100)}%`;
-  ui.frostVignette.style.opacity = String(clamp((chill - .18) * 1.45, 0, .78));
-  document.documentElement.style.setProperty("--body-top", lerpColor("#f3cb83", "#b8e0df", chill));
-  document.documentElement.style.setProperty("--body-bottom", lerpColor("#e6b76e", "#82bac1", chill));
-  ui.thermometerWrap.classList.toggle("frozen", state.temperature < 21);
-  ui.thermometerWrap.classList.toggle("cracked", state.temperature < 17.2);
-  ui.temperatureMood.textContent = state.temperature > 37 ? "TOO DARN HOT!" : state.temperature > 32 ? "A LITTLE BETTER" : state.temperature > 26 ? "NICE & BREEZY" : state.temperature > 20 ? "BRRRR..." : "FROZEN SOLID!";
-
-  const device = currentDevice();
-  const drying = device.mode.kind === "dry" && state.mode;
-  const heating = device.mode.kind === "heat" && state.mode;
-  const simulatedHumidity = Math.round(clamp(54 - state.actionLevel * 13 - (drying ? 9 : 0) + (heating ? 6 : 0), 28, 68));
-  const windAngle = device.mode.kind === "oscillate" && state.mode ? Math.sin(state.headPhase) * 24 : device.id === "handfan" ? state.pointerAim * 22 : 0;
-  ui.humidityValue.textContent = `${simulatedHumidity}%`;
-  ui.windDirection.setAttribute("aria-label", `Virtual wind aimed ${Math.abs(windAngle) < 5 ? "at you" : windAngle < 0 ? "slightly left" : "slightly right"}`);
-  document.documentElement.style.setProperty("--airflow", state.actionLevel.toFixed(3));
-  document.documentElement.style.setProperty("--wind-angle", `${windAngle.toFixed(1)}deg`);
-  document.documentElement.classList.toggle("appliance-running", state.powered && state.level > .025);
-  ui.windReadout.textContent = `${(state.actionLevel * (2.1 + device.cooling * .57)).toFixed(1)} m/s`;
-  ui.rpmReadout.textContent = device.id === "handfan" ? `${Math.round(state.rpm)} flaps/min` : `${Math.round(state.rpm).toLocaleString()} rpm`;
-  if (!state.powered && state.level < .02) ui.modeReadout.textContent = "standby";
-  else if (device.mode.kind === "heat") ui.modeReadout.textContent = state.mode ? "hot & sparky" : "cold & icy";
-  else if (device.mode.kind === "oscillate") ui.modeReadout.textContent = state.mode ? "swinging" : "straight ahead";
-  else if (device.mode.kind === "dry") ui.modeReadout.textContent = state.mode ? "drying" : state.compressorOn ? "compressor on" : "compressor resting";
-  else ui.modeReadout.textContent = state.manualBurst > .05 ? "extra flap!" : "auto flapping";
-  updateMachineStatus();
-}
-
-ui.startCurtain.addEventListener("click", async () => {
-  if (await ensureAudio()) {
-    audio.click(1.25);
-    state.powered = true;
-    state.gearIndex = 1;
-    state.target = currentDevice().gears[1].level;
-    makeGearButtons();
-    updateControls();
-  }
-});
-ui.powerButton.addEventListener("click", togglePower);
-ui.modeButton.addEventListener("click", triggerMode);
-ui.muteButton.addEventListener("click", async () => {
-  await ensureAudio();
-  state.muted = !state.muted;
-  audio.setVolume(state.muted ? 0 : Number(ui.volumeRange.value) / 100);
-  updateControls();
-});
-ui.volumeRange.addEventListener("input", (event) => {
-  const value = Number(event.target.value);
-  ui.volumeOutput.value = value;
-  ui.volumeOutput.textContent = value;
-  state.muted = value === 0;
-  audio.setVolume(state.muted ? 0 : value / 100);
-  updateControls();
-});
-ui.sceneCanvas.addEventListener("pointermove", (event) => {
-  if (currentDevice().id !== "handfan") return;
-  const box = ui.sceneCanvas.getBoundingClientRect();
-  state.pointerAim = clamp(((event.clientX - box.left) / box.width - .5) * 2, -1, 1);
-});
-ui.sceneCanvas.addEventListener("pointerdown", () => {
-  if (currentDevice().id === "handfan") triggerMode();
+DEVICES.forEach((d,i) => {
+  const b = document.createElement("button");
+  b.className = "tab"; b.type = "button"; b.setAttribute("role","tab");
+  b.setAttribute("aria-controls", "scene");
+  b.innerHTML = '<span class="num" aria-hidden="true">' + (i+1) + '</span>' + ICONS[d.icon] +
+    '<span class="lbl"><b>' + d.name + '</b><i>' + d.zh + '</i></span>' +
+    '<span class="mark" aria-hidden="true"></span>';
+  b.addEventListener("click", () => { pick(i); b.blur(); });
+  tabsEl.appendChild(b);
 });
 
-window.addEventListener("keydown", async (event) => {
-  if (event.target instanceof HTMLInputElement) return;
-  if (event.code === "Space" && event.target instanceof HTMLButtonElement) return;
-  const deviceIndex = DEVICES.findIndex((device) => device.key === event.key);
-  if (deviceIndex >= 0) selectDevice(deviceIndex);
-  if (event.code === "Space") { event.preventDefault(); await togglePower(); }
-  if (event.key.toLowerCase() === "m") triggerMode();
-  if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-    event.preventDefault();
-    await ensureAudio();
-    const direction = event.key === "ArrowUp" ? 1 : -1;
-    state.gearIndex = clamp(state.gearIndex + direction, 0, currentDevice().gears.length - 1);
-    state.powered = true;
-    state.target = currentDevice().gears[state.gearIndex].level;
-    audio.click(1 + state.gearIndex * .13);
-    makeGearButtons(); updateControls();
-  }
-});
-
-function animate(now) {
-  const frameDt = Math.min(.05, (now - state.lastFrame) / 1000);
-  state.lastFrame = now;
-  let remaining = frameDt;
-  while (remaining > 0) {
-    const dt = Math.min(1 / 120, remaining);
-    step(dt, now / 1000);
-    remaining -= dt;
-  }
-  drawScene(now / 1000);
-  drawSoundMeter(now / 1000);
-  updateFeedback();
-  requestAnimationFrame(animate);
+function buildKeys(){
+  keysEl.innerHTML = "";
+  // short face labels on the keys, the real word in the accessible name
+  ["0"].concat(S.dev.keys).forEach((lb,i) => {
+    const b = document.createElement("button");
+    b.className = "ctl key" + (i === 0 ? " stop" : ""); b.type = "button";
+    b.textContent = lb;
+    b.setAttribute("aria-label", i === 0 ? "Stop" : S.dev.gearLabel + " " + S.dev.gears[i-1]);
+    b.addEventListener("click", () => { setGear(i-1); b.blur(); });
+    keysEl.appendChild(b);
+  });
 }
 
-applyPalette();
-makeApplianceTabs();
-makeGearButtons();
-updateDeviceCopy();
-updateControls();
-requestAnimationFrame(animate);
+function pick(i){
+  if (DEVICES[i] === S.dev) return;
+  S.dev = DEVICES[i];
+  S.gear = Math.min(S.gear, S.dev.gears.length-1);
+  if (!S.dev.pin) S.pin = false;
+  if (!S.dev.mode) S.mode = false;
+  S.cycleOn = true; S.cycleT = 0; S.cycleGain = 1; S.dripT = 0; S.condense = 0;
+  BITS.length = 0; CLOTH.ready = false;
+  buildKeys(); sync(); clack(false);
+}
+
+// off → starting → running → speeding up / easing off → stopping → off.
+// Derived from the level rather than stored, so it can never disagree with what
+// the picture is doing.
+function phaseOf(){
+  const target = S.on ? S.dev.gearLevel[S.gear] : 0;
+  const lv = effLevel();
+  if (!S.on) return lv < .02 ? "off" : "stopping";
+  if (lv < target - .05) return S.spunUp ? "speeding up" : "starting";
+  if (lv > target + .05) return "easing off";
+  return "running";
+}
+
+function setGear(i){
+  wake();
+  const was = S.on ? S.gear : -1;
+  if (i < 0){ S.on = false; S.spunUp = false; }
+  else { if (!S.on) S.spunUp = false; S.on = true; S.gear = clamp(i, 0, S.dev.gears.length-1); }
+  const now = S.on ? S.gear : -1;
+  if (now !== was) clack(now > was);
+  sync();
+}
+
+// A control that does not apply to the current appliance is disabled where it
+// stands rather than removed. Nothing on the plate ever changes position, which
+// is the difference between a machine and a web page.
+function setSlot(groupId, ctlId, applies, pressed, caption, text){
+  const grp = $(groupId), ctl = $(ctlId);
+  grp.setAttribute("aria-disabled", applies ? "false" : "true");
+  ctl.disabled = !applies;
+  ctl.setAttribute("aria-pressed", applies && pressed ? "true" : "false");
+  if (caption) grp.querySelector(".cap").textContent = caption;
+  ctl.querySelector(".txt").textContent = text;
+}
+
+function sync(){
+  const d = S.dev;
+  [...tabsEl.children].forEach((el,i) => {
+    const on = DEVICES[i] === d;
+    el.setAttribute("aria-selected", on ? "true" : "false");
+    el.tabIndex = on ? 0 : -1;
+  });
+  [...keysEl.children].forEach((el,i) =>
+    el.setAttribute("aria-pressed", (S.on ? S.gear+1 : 0) === i ? "true" : "false"));
+
+  $("capSpeed").textContent = d.gearLabel;
+  setSlot("grpLatch", "latch", !!d.pin, S.pin, null, d.pin ? (S.pin ? "swinging" : "pin") : "n/a");
+  setSlot("grpHeat", "heat", !!d.mode, S.mode,
+          d.id === "ac" ? "mode" : "air",
+          d.mode ? (S.mode ? d.mode.on : d.mode.off).toLowerCase() : "n/a");
+
+  $("kAux").textContent = d.cycle ? d.cycle.label : "humidity";
+  $("kRpm").textContent = d.unit;
+  $("note").textContent = d.note;
+
+  const pct = Math.round(S.vol*100);
+  $("dial").style.setProperty("--a", (S.vol*270 - 135) + "deg");
+  $("dial").setAttribute("aria-valuenow", pct);
+  $("dial").setAttribute("aria-valuetext", pct + " percent");
+  $("vGear").textContent = S.on ? d.gears[S.gear] : "off";
+  $("vPhase").textContent = phaseOf();
+  $("sceneNo").textContent = "Scene " + (DEVICES.indexOf(d) + 1);
+  $("statusLine").textContent = statusLine();
+  $("mute").setAttribute("aria-pressed", S.muted ? "true" : "false");
+  $("mute").setAttribute("aria-label", S.muted ? "Unmute sound" : "Mute sound");
+  $("muteWave").style.display = S.muted ? "none" : "";
+  $("muteX").style.display = S.muted ? "" : "none";
+  announce();
+}
+
+// Short, plain status copy with a bit of personality. It never replaces the
+// precise phase in the readout — that stays terse — it just says it in English.
+function statusLine(){
+  const d = S.dev, lv = effLevel(), ph = phaseOf();
+  if (ph === "off")         return d.manual ? "fan resting on the table" : "taking a nap";
+  if (ph === "starting")    return d.manual ? "manual effort detected" : "motor warming up";
+  if (ph === "stopping")    return "winding down";
+  if (ph === "speeding up") return "asking for more";
+  if (ph === "easing off")  return "backing off a little";
+  if (d.cycle && S.cycleGain < .5) return "compressor taking five";
+  if (d.mode && S.mode && d.id === "dryer") return "hot air, as promised";
+  const cooled = AMBIENT - S.temp;
+  if (lv > .92) return cooled > 5 ? "suspiciously arctic" : "everything is flapping";
+  if (lv > .60) return cooled > 2.5 ? "questionably cooler" : "a respectable little breeze";
+  return d.manual ? "a polite little draught" : "barely stirring the dust";
+}
+
+// One short sentence for assistive technology, only when something actually changed.
+let saidLast = "";
+function announce(){
+  const d = S.dev;
+  const said = d.name + ", " + (S.on ? d.gearLabel + " " + d.gears[S.gear] : "off") +
+               (d.pin && S.pin ? ", swinging" : "") +
+               (d.mode && S.mode ? ", " + d.mode.on.toLowerCase() : "") +
+               (S.muted ? ", muted" : "") + ". " + statusLine() + ".";
+  if (said !== saidLast){ saidLast = said; $("live").textContent = said; }
+}
+
+$("latch").addEventListener("click", e => {
+  S.pin = !S.pin; sync(); clack(false); e.currentTarget.blur();
+});
+$("heat").addEventListener("click", e => {
+  S.mode = !S.mode; sync(); clack(true); e.currentTarget.blur();
+});
+$("mute").addEventListener("click", e => {
+  S.muted = !S.muted; wake(); sync();
+  if (!S.muted) clack(false);
+  e.currentTarget.blur();
+});
+
+// the volume knob: drag it, scroll it, or nudge it with the arrows
+(() => {
+  const dial = $("dial");
+  let dragging = false, y0 = 0, v0 = 0;
+  const set = v => { S.vol = clamp(v, 0, 1); sync(); };
+  dial.addEventListener("pointerdown", e => {
+    dragging = true; y0 = e.clientY; v0 = S.vol; dial.setPointerCapture(e.pointerId); e.preventDefault();
+  });
+  dial.addEventListener("pointermove", e => { if (dragging) set(v0 + (y0 - e.clientY)/180); });
+  dial.addEventListener("pointerup",   () => { dragging = false; });
+  dial.addEventListener("wheel", e => { e.preventDefault(); set(S.vol - Math.sign(e.deltaY)*.06); }, {passive:false});
+  dial.addEventListener("keydown", e => {
+    if (e.key === "ArrowUp" || e.key === "ArrowRight"){ e.preventDefault(); set(S.vol + .06); }
+    if (e.key === "ArrowDown" || e.key === "ArrowLeft"){ e.preventDefault(); set(S.vol - .06); }
+  });
+})();
+
+// ── waking the audio up ─────────────────────────────────────────────────────
+// Nothing is created until a real gesture arrives, and resume() is retried on
+// every later gesture in case the first one was refused.
+const UNLOCK_KEY = "cyberfan.unlocked";
+// The curtain leaves the stage rather than blinking out, and the unlock is
+// remembered for this page session only — a reload in the same tab skips it.
+function raiseCurtain(){
+  const el = $("curtain");
+  if (el.hidden) return;
+  try { sessionStorage.setItem(UNLOCK_KEY, "1"); } catch (_){}
+  if (calm){ el.hidden = true; return; }
+  el.classList.add("leaving");
+  setTimeout(() => { el.hidden = true; el.classList.remove("leaving"); }, 340);
+}
+function wake(){
+  if (!AU) AU = buildAudio();
+  if (AU && AU.ctx.state !== "running") AU.ctx.resume().catch(() => {});
+  S.started = true;
+  raiseCurtain();
+}
+try { if (sessionStorage.getItem(UNLOCK_KEY)) $("curtain").hidden = true; } catch (_){}
+$("curtain").addEventListener("click", () => { wake(); setGear(0); });
+addEventListener("pointerdown", wake, {once:false});
+
+// ── pointer over the stage ──────────────────────────────────────────────────
+function stagePoint(e){
+  const r = cv.getBoundingClientRect();
+  return {x:(e.clientX - r.left) * W/r.width, y:(e.clientY - r.top) * H/r.height};
+}
+cv.addEventListener("pointermove", e => {
+  const p = stagePoint(e); S.pointer.x = p.x; S.pointer.y = p.y; S.pointer.inside = true;
+}, {passive:true});
+cv.addEventListener("pointerleave", () => { S.pointer.inside = false; });
+cv.addEventListener("pointerdown", e => {
+  wake();
+  const p = stagePoint(e); S.pointer.x = p.x; S.pointer.y = p.y; S.pointer.inside = true;
+  if (S.dev.manual){ S.handBoost = Math.min(1, S.handBoost + .58); S.on = true; sync(); }
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener("pointerup", e => { try { cv.releasePointerCapture(e.pointerId); } catch(_){} });
+
+addEventListener("keydown", e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.target.classList && e.target.classList.contains("dial")) return;
+  const n = parseInt(e.key, 10);
+  if (n >= 1 && n <= DEVICES.length){ pick(n-1); wake(); return; }
+  if (e.key === "ArrowUp"){ e.preventDefault(); setGear(S.on ? S.gear+1 : 0); }
+  else if (e.key === "ArrowDown"){ e.preventDefault(); setGear(S.on ? S.gear-1 : -1); }
+  else if (e.key === " "){ e.preventDefault(); wake(); S.on ? setGear(-1) : setGear(S.gear); }
+  else if (e.key === "p" || e.key === "P"){ if (S.dev.pin){ S.pin = !S.pin; sync(); clack(false); } }
+  else if (e.key === "h" || e.key === "H"){ if (S.dev.mode){ S.mode = !S.mode; sync(); clack(true); } }
+  else if (e.key === "m" || e.key === "M"){ S.muted = !S.muted; sync(); }
+});
+
+// A tablist is arrowed through, not tabbed through: one stop for the whole strip.
+tabsEl.addEventListener("keydown", e => {
+  const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1
+             : e.key === "Home" ? -99 : e.key === "End" ? 99 : 0;
+  if (!step) return;
+  e.preventDefault();
+  const at = DEVICES.indexOf(S.dev);
+  const to = step === -99 ? 0 : step === 99 ? DEVICES.length-1
+           : (at + step + DEVICES.length) % DEVICES.length;
+  pick(to); tabsEl.children[to].focus();
+});
+
+// ── loop ────────────────────────────────────────────────────────────────────
+// The simulation runs on a fixed 120 Hz step and the renderer takes whatever frame
+// rate it gets. Integrating the raw frame delta instead would make a fan spin up
+// slower on a slow machine, which is the one thing a spin-up time must not do.
+const FIXED = 1/120, MAX_CATCHUP = .25;
+const effLevel = () => clamp(S.level + (S.dev.manual ? S.handBoost*.72 : 0), 0, 1.12);
+let last = performance.now(), acc = 0, readT = 0;
+
+function step(dt){
+  const d = S.dev;
+
+  const target = S.on ? d.gearLevel[S.gear] : 0;
+  const tau = target > S.level ? d.spin.up : d.spin.down;
+  S.level += (target - S.level) * (1 - Math.exp(-dt/tau));
+  if (S.level < 1e-4 && target === 0) S.level = 0;
+  S.handBoost *= Math.exp(-dt/1.15);
+  S.camKick   *= Math.exp(-dt/.45);
+  const lv = effLevel();
+
+  if (d.cycle && lv > .01){
+    S.cycleT += dt;
+    if (S.cycleT > (S.cycleOn ? d.cycle.on : d.cycle.off)){
+      S.cycleOn = !S.cycleOn; S.cycleT = 0;
+      if (AU && S.cycleOn) tick(88, .22, .13, "sine");            // the thunk of it starting
+    }
+    S.cycleGain += ((S.cycleOn ? 1 : 0) - S.cycleGain) * (1 - Math.exp(-dt/d.cycle.ramp));
+  } else { S.cycleGain = 1; }
+
+  S.wobbleT += dt;
+  S.rotorAngle = (S.rotorAngle + dt * rpmOf(d, lv)/60 * Math.PI*2) % (Math.PI*2);
+  const headSwings = (d.pin && S.pin) || d.id === "ac";
+  S.headPhase += dt * (headSwings ? .80 : 0) * Math.max(.30, lv);
+
+  if (d.id === "fan"){
+    const sweep = S.pin ? Math.sin(S.headPhase)*.62 : 0;
+    const fore  = Math.cos(sweep)*.34 + .66;
+    // the ribbon is whipped by the head's direction as well as by its speed
+    stepCloth(dt, FAN.bx + Math.sin(sweep)*20 + Math.cos(-.72)*FAN.cage*fore,
+                  FAN.hy + Math.sin(-.72)*FAN.cage,
+                  (90 + 720*lv) * (1 + sweep*.55), -260*lv);
+  }
+
+  if (d.manual){
+    S.handX += ((S.pointer.inside ? clamp(S.pointer.x, 170, W-170) : HAND.px) - S.handX) * (1 - Math.exp(-dt/.22));
+    if (S.on || S.handBoost > .02){
+      const before = Math.sin(S.swingPhase);
+      S.swingPhase += dt * (1.0 + 5.0*lv);
+      const after = Math.sin(S.swingPhase);
+      if (before <= 0 && after > 0){ S.swingSign =  1; handSwing(clamp(lv,0,1)); }
+      if (before >= 0 && after < 0){ S.swingSign = -1; handSwing(clamp(lv,0,1)); }
+    }
+  }
+
+  // placebo thermodynamics, then frost follows the temperature with a lag
+  const cool = (d.mode && S.mode) ? d.coolAlt : d.cool;
+  S.temp += ((AMBIENT - cool*lv) - S.temp) * (1 - Math.exp(-dt/16));
+  const want = clamp((AMBIENT - S.temp)/7, 0, 1);
+  S.frost += (want - S.frost) * (1 - Math.exp(-dt/2.2));
+  puddle = Math.max(0, puddle - dt*.012);
+
+  // Only the air conditioner takes water out of the air; a fan just moves it
+  // around. Simulated, and the plaque says so.
+  const humidTo = (d.id === "ac" && lv > .05) ? (S.mode ? .26 : .50) : .72;
+  S.humid += (humidTo - S.humid) * (1 - Math.exp(-dt/24));
+
+  // the window unit fogs its own glass while the compressor is actually pulling
+  const fogTo = (d.id === "ac" && lv > .05) ? .45 + .55*S.cycleGain : 0;
+  S.condense += (fogTo - S.condense) * (1 - Math.exp(-dt/(fogTo > S.condense ? 5 : 12)));
+
+  // ── the inspection stamp ──────────────────────────────────────────────────
+  // Hold anything at its top setting for a while and the department drops by.
+  // Once per page session, and it never touches the controls.
+  const flatOut = S.on && S.gear === d.gears.length - 1 && lv > .92;
+  S.topGearT = flatOut ? S.topGearT + dt : Math.max(0, S.topGearT - dt*2);
+  if (S.stamp < 0 && S.topGearT > 8 && !stampSpent()) { S.stamp = 0; spendStamp(); }
+  if (S.stamp >= 0){
+    S.stamp += dt;
+    if (S.stamp > 4.6) S.stamp = -1;
+  }
+
+  emitFor(dt, lv); stepBits(dt);
+
+  // a nearly-still room still has dust in it
+  if (lv < .05 && !calm){
+    S.dustT += dt;
+    if (S.dustT > 1.6){
+      S.dustT = 0;
+      spawn({k:"fly", ox:-40, oy:H*(.12 + .5*Math.random()), ang:.12 + .12*Math.random(),
+             r:20, v:16 + 12*Math.random(), accel:.16, max:9, r0:3.4,
+             leaf:false, spin:0, dspin:.4, a:.5});
+    }
+  } else { S.dustT = 0; }
+}
+
+function frame(now){
+  const elapsed = Math.min(MAX_CATCHUP, (now - last)/1000);
+  last = now; acc += elapsed;
+  while (acc >= FIXED){ step(FIXED); acc -= FIXED; }
+
+  const d = S.dev, lv = effLevel();
+  DF = calm ? 0 : Math.floor(S.wobbleT * DRAW_HZ);   // re-wobble the ink 12 times a second
+  pushAudio();
+
+  // The room is filmed, the frost and the grain are on the lens. Wind buffets the
+  // camera, so the room moves inside the frame and the dirt on the glass does not.
+  const knock = knockFor(lv);
+  const zoom = 1.035 + .014*knock*(.5 + .5*Math.sin(S.wobbleT*9.3));
+  g.save();
+  g.translate(W/2, H/2); g.scale(zoom, zoom); g.translate(-W/2, -H/2);
+  g.translate(vnoise(S.wobbleT*6.3)*5.2*knock, vnoise(S.wobbleT*5.1+11)*3.4*knock);
+  drawRoom();
+  drawClock();
+  drawCalendar(lv);
+  drawTag(lv);
+  drawThermometer();
+  if (d.id === "ac")    drawAC(lv);
+  if (d.id === "fan")   drawFan(lv);
+  if (d.id === "dryer") drawDryer(lv);
+  if (d.id === "hand")  drawHandFan(lv);
+  drawBits();
+  drawStamp();
+  g.restore();
+  drawFrost();
+  drawGrain();
+
+  readT += elapsed;
+  if (readT > .12){
+    readT = 0;
+    const rpm = rpmOf(d, lv);
+    const phase = phaseOf();
+    if (phase === "running") S.spunUp = true;
+    $("vPhase").textContent = phase;
+    $("statusLine").textContent = statusLine();
+    $("vRpm").textContent = Math.round(rpm).toLocaleString();
+    $("bRun").className = "bulb" + (lv > .03 ? " on" : "");
+    if (d.cycle){
+      $("vAux").textContent = S.cycleGain > .5 ? "running" : "resting";
+      $("bAux").className = "bulb" + (S.cycleGain > .5 ? " cold" : "");
+    } else {
+      $("vAux").textContent = Math.round(S.humid*100) + "%";
+      $("bAux").className = "bulb" + (S.humid < .45 ? " cold" : S.humid > .62 ? " hot" : " on");
+    }
+    $("vTemp").textContent = S.temp.toFixed(1) + "°";
+  }
+  requestAnimationFrame(frame);
+}
+
+fitCanvas(); buildKeys(); sync(); startClock();
+requestAnimationFrame(frame);
+
+// ── self-test ───────────────────────────────────────────────────────────────
+// ?selftest=1 runs the assertions a screenshot cannot make. Nothing below runs,
+// and nothing is put on window, unless that flag is present. Viewport-dependent
+// checks measure the width they are run at, so the runner resizes and re-runs.
+if (new URLSearchParams(location.search).has("selftest")) setTimeout(runSelfTest, 60);
+
+function runSelfTest(){
+  const R = el => el.getBoundingClientRect();
+  const res = [];
+  const ok = (name, cond, detail) => res.push({name, pass: !!cond, detail: detail || ""});
+  const keysOf = () => [...document.querySelectorAll(".key")];
+  const tabsOf = () => [...document.querySelectorAll(".tab")];
+  const press = key => dispatchEvent(new KeyboardEvent("keydown", {key, bubbles:true, cancelable:true}));
+  const doc = document.scrollingElement;
+
+  // ── layout ────────────────────────────────────────────────────────────────
+  ok("no horizontal page overflow", doc.scrollWidth <= doc.clientWidth + 1,
+     doc.scrollWidth + " vs " + doc.clientWidth);
+
+  const clipped = [...document.querySelectorAll(".wrap *")].filter(el =>
+    !el.children.length && !el.classList.contains("visually-hidden") &&
+    el.scrollWidth > el.clientWidth + 1);
+  ok("no control label is clipped", clipped.length === 0,
+     clipped.map(e => (e.className||e.tagName) + ":" + e.textContent.trim().slice(0,12)).join(", "));
+
+  const small = [...document.querySelectorAll("button")].filter(b => {
+    const r = R(b); return r.width > 0 && (r.width < 44 || r.height < 44); });
+  ok("every button clears a 44px target", small.length === 0,
+     small.map(b => b.className.slice(0,16) + ":" + Math.round(R(b).width) + "x" + Math.round(R(b).height)).join(", "));
+
+  const tabBoxes = new Set(tabsOf().map(t => t.offsetWidth + "x" + t.offsetHeight));
+  ok("all four tabs share one layout box", tabBoxes.size === 1, [...tabBoxes].join(" / "));
+
+  // ── the plate must not move when the appliance changes ────────────────────
+  const before = DEVICES.indexOf(S.dev);
+  const shapes = new Set();
+  tabsOf().forEach((t,i) => { t.click();
+    const pr = R(document.querySelector(".plate")), rr = R(document.querySelector(".readout"));
+    shapes.add(Math.round(pr.height) + "/" + Math.round(rr.left) + "/" + Math.round(rr.width)); });
+  ok("plate geometry is identical for every appliance", shapes.size === 1, [...shapes].join(" | "));
+  tabsOf()[before].click();
+
+  // ── controls agree with state ─────────────────────────────────────────────
+  let sync1 = true, sync1why = "";
+  DEVICES.forEach((d, di) => {
+    tabsOf()[di].click();
+    const ks = keysOf();
+    if (ks.length !== d.gears.length + 1){ sync1 = false; sync1why = d.id + " key count"; return; }
+    ks.forEach((k, ki) => {
+      k.click();
+      const pressed = ks.filter(x => x.getAttribute("aria-pressed") === "true");
+      if (pressed.length !== 1 || pressed[0] !== k){ sync1 = false; sync1why = d.id + " key " + ki + " pressed set"; }
+      const want = ki === 0 ? "off" : d.gears[ki-1];
+      if (document.getElementById("vGear").textContent !== want){
+        sync1 = false; sync1why = d.id + " readout " + document.getElementById("vGear").textContent + " != " + want; }
+      if (ki > 0 && (!S.on || S.gear !== ki-1)){ sync1 = false; sync1why = d.id + " model gear"; }
+    });
+    ks[0].click();
+  });
+  ok("every key matches the model and the readout", sync1, sync1why);
+
+  // controls that do not apply are disabled in place, never removed
+  let slots = true, slotsWhy = "";
+  DEVICES.forEach((d, di) => {
+    tabsOf()[di].click();
+    const latch = document.getElementById("latch"), heat = document.getElementById("heat");
+    if (latch.disabled !== !d.pin){ slots = false; slotsWhy = d.id + " pin"; }
+    if (heat.disabled !== !d.mode){ slots = false; slotsWhy = d.id + " mode"; }
+    if (R(latch).width === 0 || R(heat).width === 0){ slots = false; slotsWhy = d.id + " slot removed"; }
+  });
+  ok("inapplicable controls are disabled, not removed", slots, slotsWhy);
+  tabsOf()[0].click();
+
+  // ── keyboard ──────────────────────────────────────────────────────────────
+  keysOf()[0].click();
+  press("ArrowUp");
+  const kbOn = S.on && S.gear === 0;
+  press("ArrowUp");
+  const kbUp = S.on && S.gear === 1;
+  press("ArrowDown"); press("ArrowDown");
+  const kbOff = !S.on;
+  press(" ");
+  const kbSpace = S.on;
+  press(" ");
+  ok("arrow keys and space drive the speed", kbOn && kbUp && kbOff && kbSpace,
+     [kbOn, kbUp, kbOff, kbSpace].join(","));
+
+  const pinBefore = S.pin; press("p");
+  ok("P works the swing pin", S.pin !== pinBefore); press("p");
+  const muteBefore = S.muted; press("m");
+  ok("M works the mute", S.muted !== muteBefore &&
+     document.getElementById("mute").getAttribute("aria-pressed") === String(S.muted)); press("m");
+  press("3");
+  ok("number keys pick an appliance", S.dev === DEVICES[2], S.dev.id);
+  press("1");
+
+  const named = [...document.querySelectorAll("button")].every(b =>
+    (b.textContent || "").trim() || b.getAttribute("aria-label") || b.title);
+  ok("every button has an accessible name", named);
+  ok("the tab strip is one tab stop with a roving index",
+     tabsOf().filter(t => t.tabIndex === 0).length === 1);
+
+  // ── the wall reads the visitor's own clock ────────────────────────────────
+  const now = new Date();
+  ok("calendar shows today's day number",
+     CLOCK.parts && CLOCK.parts.day === FMT.day.format(now), CLOCK.parts && CLOCK.parts.day);
+  ok("calendar shows today's weekday and month",
+     CLOCK.parts && CLOCK.parts.weekday === FMT.weekday.format(now).toUpperCase() &&
+     CLOCK.parts.month === FMT.month.format(now).toUpperCase(),
+     CLOCK.parts && CLOCK.parts.weekday + " " + CLOCK.parts.month);
+
+  const wall = document.getElementById("wallTime");
+  CLOCK.minuteKey = ""; refreshDate(new Date());
+  ok("clock text refreshes on a minute rollover",
+     wall.textContent.indexOf(FMT.time.format(new Date())) >= 0, wall.textContent);
+
+  const keptDay = CLOCK.dayKey, keptParts = CLOCK.parts;
+  const tomorrow = new Date(Date.now() + 864e5);
+  refreshDate(tomorrow);
+  ok("the date rolls over to a new day", CLOCK.parts.day === FMT.day.format(tomorrow));
+  CLOCK.dayKey = keptDay; CLOCK.parts = keptParts;
+  CLOCK.minuteKey = ""; refreshDate(new Date());
+
+  stopClock();
+  ok("stopClock clears its interval", CLOCK.timer === 0);
+  startClock();
+  ok("startClock starts exactly one interval", CLOCK.timer !== 0);
+
+  // ── reduced motion reaches the drawing, not just the stylesheet ───────────
+  const wasCalm = calm;
+  setCalm(true);
+  BITS.length = 0;
+  for (let i = 0; i < 600; i++) spawn({k:"gust", ox:0, oy:0, ang:0, r:1, v:1, accel:1, w:1, max:9});
+  ok("reduced motion caps the particle budget", BITS.length <= 190, String(BITS.length));
+  ok("reduced motion stills the camera and the ink line", knockFor(1) === 0 && shakeFor(1) === 0);
+  setCalm(wasCalm); BITS.length = 0;
+
+  // ── the appliances still behave ───────────────────────────────────────────
+  let phys = true, physWhy = "";
+  DEVICES.forEach((d, di) => {
+    tabsOf()[di].click();
+    S.level = 0; S.handBoost = 0; S.on = true; S.gear = d.gears.length - 1; S.spunUp = false;
+    const target = d.gearLevel[S.gear];
+    let t = 0; const dt = 1/120;
+    while (t < 3 * d.spin.up + .5){ step(dt); t += dt; }
+    if (effLevel() < target * .93){ phys = false; physWhy = d.id + " never reached speed"; }
+    if (rpmOf(d, effLevel()) <= 0){ phys = false; physWhy = d.id + " rpm zero at speed"; }
+    if (phaseOf() !== "running"){ phys = false; physWhy = d.id + " phase " + phaseOf(); }
+    S.on = false; S.handBoost = 0;
+    t = 0; while (t < 4.5 * d.spin.down + 1){ step(dt); t += dt; }
+    if (effLevel() > .05){ phys = false; physWhy = d.id + " never stopped"; }
+    if (phaseOf() !== "off"){ phys = false; physWhy = d.id + " did not settle to off"; }
+  });
+  ok("every appliance spins up, runs, and coasts to a stop", phys, physWhy);
+  tabsOf()[0].click(); keysOf()[0].click();
+
+  // ── the curtain, and remembering it for this session only ────────────────
+  const curtain = document.getElementById("curtain");
+  try { sessionStorage.removeItem(UNLOCK_KEY); } catch (_){}
+  curtain.hidden = false;
+  const wasCalm2 = calm; setCalm(true);          // the calm path hides it synchronously
+  raiseCurtain();
+  ok("the curtain raises and is remembered for the session",
+     curtain.hidden === true && sessionStorage.getItem(UNLOCK_KEY) === "1");
+  ok("the curtain is a real button for the keyboard",
+     curtain.tagName === "BUTTON" && curtain.type === "button");
+  setCalm(wasCalm2);
+
+  // ── status copy stays short and answers the state ────────────────────────
+  tabsOf()[0].click(); keysOf()[0].click();
+  const idle = statusLine();
+  keysOf()[keysOf().length-1].click();
+  S.level = 1; S.spunUp = true;
+  const busy = statusLine();
+  ok("status copy changes with the state and stays short",
+     idle !== busy && idle.length < 42 && busy.length < 42, idle + " / " + busy);
+  ok("the slate names the reel", $("sceneNo").textContent === "Scene 1", $("sceneNo").textContent);
+
+  // ── the inspection stamp fires once, and only at full throttle ───────────
+  try { sessionStorage.removeItem(STAMP_KEY); } catch (_){}
+  S.stamp = -1; S.topGearT = 0;
+  tabsOf()[0].click(); keysOf()[1].click();       // a low gear must never trigger it
+  S.level = DEVICES[0].gearLevel[0];
+  for (let t = 0, dt = 1/120; t < 11; t += dt) step(dt);
+  const lowGearQuiet = S.stamp < 0;
+  keysOf()[keysOf().length-1].click();
+  for (let t = 0, dt = 1/120; t < 11; t += dt) step(dt);
+  const fired = S.stamp >= 0 || sessionStorage.getItem(STAMP_KEY) === "1";
+  ok("the stamp waits for the top setting", lowGearQuiet);
+  ok("the stamp arrives after eight seconds flat out", fired);
+  S.stamp = -1; S.topGearT = 0;
+  for (let t = 0, dt = 1/120; t < 11; t += dt) step(dt);
+  ok("the stamp does not come back in the same session", S.stamp < 0);
+
+  // ── each appliance leaves its own mark ───────────────────────────────────
+  ok("paper reacts differently to each appliance",
+     new Set(DEVICES.map(d => d.paper)).size === DEVICES.length,
+     DEVICES.map(d => d.id + ":" + d.paper).join(" "));
+  tabsOf()[1].click(); keysOf()[keysOf().length-1].click();
+  for (let t = 0, dt = 1/120; t < 8; t += dt) step(dt);
+  const acFogs = S.condense > .05;
+  tabsOf()[0].click(); keysOf()[keysOf().length-1].click();
+  for (let t = 0, dt = 1/120; t < 14; t += dt) step(dt);
+  ok("only the window unit fogs the glass", acFogs && S.condense < .05,
+     "ac " + acFogs + ", fan " + S.condense.toFixed(3));
+  tabsOf()[0].click(); keysOf()[0].click();
+
+  // ── mute reaches the model, not just the label ───────────────────────────
+  const mutedWas = S.muted;
+  document.getElementById("mute").click();
+  ok("mute flips the model and the control together",
+     S.muted !== mutedWas &&
+     document.getElementById("mute").getAttribute("aria-pressed") === String(S.muted));
+  document.getElementById("mute").click();
+
+  // ── report ────────────────────────────────────────────────────────────────
+  const pass = res.filter(r => r.pass).length;
+  const out = {width: innerWidth, portrait: portraitScene, pass, total: res.length,
+               failures: res.filter(r => !r.pass), results: res};
+  window.__selftest = out;
+  document.title = "selftest " + pass + "/" + res.length + " @" + innerWidth + "px";
+  const pre = document.createElement("pre");
+  pre.id = "selftest-report";
+  pre.style.cssText = "margin:16px auto;max-width:1180px;padding:16px;border:3px solid #241a12;" +
+    "border-radius:14px;background:#f9f2df;font:12px/1.6 ui-monospace,monospace;white-space:pre-wrap";
+  pre.textContent = "CyberFan self-test @ " + innerWidth + "px (" +
+    (portraitScene ? "portrait scene" : "wide scene") + ")\n" +
+    res.map(r => (r.pass ? "  PASS  " : "  FAIL  ") + r.name + (r.detail ? "  — " + r.detail : "")).join("\n") +
+    "\n\n" + pass + "/" + res.length + " passed";
+  document.body.appendChild(pre);
+  return out;
+}

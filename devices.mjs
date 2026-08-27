@@ -1,90 +1,78 @@
+// ── the appliances ──────────────────────────────────────────────────────────
+// One synth patched four ways. Three noise paths (broadband air, a resonant peak,
+// a low rumble), five partials pinned to the blade-pass frequency, and a sawtooth
+// for motor whine. The difference between a hair dryer and a window unit is these
+// numbers, not different code.
+//   f : [value at the lowest speed, value at full] in Hz, swept exponentially
+//   g : gain at full throttle;  k : how sharply that gain climbs with the speed
 export const DEVICES = [
   {
-    id: "fan",
-    key: "1",
-    name: "Retro Oscillating Fan",
-    short: "Retro Fan",
-    zh: "经典摇头电风扇",
-    icon: "fan",
-    renderer: "fan",
-    palette: { main: "#70b9c5", trim: "#e45143", pale: "#dff1e9" },
-    blades: 4,
-    rpm: [260, 1120],
-    cooling: 5.4,
-    gears: [
-      { label: "1 · BREEZE", level: .32 },
-      { label: "2 · BRISK", level: .64 },
-      { label: "3 · GALE", level: 1 }
-    ],
-    mode: { label: "PULL OSCILLATION PIN", short: "OSCILLATE", kind: "oscillate" },
-    sound: { air: .43, cutoff: [520, 3600], rumble: .08, motor: [46, 104], tone: .055 },
-    caption: "Pull the brass pin, pick a clacky gear, and watch the red ribbon tell you exactly how windy it is."
+    id:"fan", name:"Oscillating Fan", zh:"摇头电风扇", icon:"fan",
+    gears:["1","2","3"], keys:["1","2","3"], gearLevel:[.38,.68,1], gearLabel:"speed",
+    blades:4, rpm:[170,620], unit:"rpm", spin:{up:1.1,down:2.9},
+    pin:true, shake:.55, cool:5.5, paper:.85,
+    air :{g:.32,k:1.20,f:[280,2000],q:.7},
+    res :{g:.085,k:1.5,f:[380,820],q:2.2},
+    rum :{g:.10,k:1.1,f:[70,120],q:1.0},
+    tone:{g:.070,k:1.5,harm:[1,.6,.35,.18,.08],beat:0},
+    note:"Four blades at 620 rpm put the blade-pass tone at 41 Hz. The cage faces you, so air " +
+         "leaves it radially and accelerates as it arrives — approaching air fills more of your view " +
+         "every frame, and that is the whole trick. Pull the pin and the head swings, which pans the " +
+         "noise across the stereo field and drags the ribbon with it."
   },
   {
-    id: "ac",
-    key: "2",
-    name: "Vintage Window AC",
-    short: "Window AC",
-    zh: "复古大头空调",
-    icon: "ac",
-    renderer: "ac",
-    palette: { main: "#d9cba8", trim: "#5a9ca9", pale: "#f8edcf" },
-    blades: 18,
-    rpm: [140, 680],
-    cooling: 8.4,
-    gears: [
-      { label: "1 · FAN", level: .30 },
-      { label: "2 · COOL", level: .66 },
-      { label: "MAX · FREEZE", level: 1 }
-    ],
-    mode: { label: "DEHUMIDIFY LAMP", short: "DEHUMIDIFY", kind: "dry" },
-    compressor: { on: 10, off: 4.5 },
-    sound: { air: .38, cutoff: [390, 2500], rumble: .28, motor: [50, 79], tone: .045 },
-    caption: "Its compressor wakes with a floor-shaking hum, the louvers nod, and a suspicious little drip forms underneath."
+    id:"ac", name:"Window A/C", zh:"窗式空调", icon:"ac",
+    gears:["lo","hi"], keys:["L","H"], gearLevel:[.6,1], gearLabel:"blower",
+    blades:35, rpm:[90,260], unit:"rpm", spin:{up:2.0,down:3.6},
+    mode:{on:"DRY", off:"COOL"}, shake:.34, cool:8.0, coolAlt:3.2, dripRate:.45, paper:.45,
+    air :{g:.30,k:1.10,f:[260,1400],q:.6},
+    res :{g:.06,k:1.3,f:[300,600],q:1.8},
+    rum :{g:.26,k:.90,f:[55,95],q:1.3},
+    tone:{g:.022,k:1.5,harm:[1,.35,.15],beat:0},
+    cycle:{on:11,off:7,ramp:1.8,label:"compressor",affects:["rum","tone"]},
+    note:"The blower runs continuously; the compressor does not. It cuts in on its own timer, " +
+         "shoves the whole box sideways, takes the bottom of the spectrum with it when it stops, and " +
+         "leaves a puddle either way. The cold rolls down out of the louvres and over the lens."
   },
   {
-    id: "dryer",
-    key: "3",
-    name: "Classic Hair Dryer",
-    short: "Hair Dryer",
-    zh: "老式吹风机",
-    icon: "dryer",
-    renderer: "dryer",
-    palette: { main: "#db6659", trim: "#f0c45d", pale: "#f7dfba" },
-    blades: 9,
-    rpm: [3600, 12500],
-    cooling: 2.9,
-    gears: [
-      { label: "1 · PUFF", level: .34 },
-      { label: "2 · WHOOSH", level: .68 },
-      { label: "MAX · BLAST", level: 1 }
-    ],
-    mode: { label: "COLD / HOT TOGGLE", short: "HOT AIR", kind: "heat" },
-    sound: { air: .49, cutoff: [1300, 8400], rumble: .035, motor: [155, 415], tone: .13 },
-    caption: "Cold mode spits ice crystals. Hot mode glows cherry red, throws sparks, and very much does not lower the thermometer."
+    id:"dryer", name:"Hair Dryer", zh:"老式吹风机", icon:"dryer",
+    gears:["I","II"], keys:["I","II"], gearLevel:[.55,1], gearLabel:"blast",
+    blades:11, rpm:[4000,9000], unit:"rpm", spin:{up:.50,down:.80},
+    mode:{on:"HOT", off:"COLD"}, shake:.70, cool:1.2, coolAlt:-6.0, paper:1.35,
+    air :{g:.30,k:1.30,f:[900,6500],q:.5},
+    res :{g:.07,k:1.5,f:[1200,2600],q:3.0},
+    rum :{g:.04,k:1.2,f:[90,150],q:1.0},
+    tone:{g:.020,k:1.6,harm:[1,.4,.2],beat:0},
+    whine:{g:.095,k:1.9,f0:[140,330],lp:[1200,5200]},
+    note:"Pointed straight down the barrel at you, because a dryer drawn in profile blows past " +
+         "your ear and this one should not. The only universal motor in the set, so it gets a " +
+         "sawtooth: a buzzy stack at 330 Hz. Hot loads the motor and drags that pitch down eight " +
+         "percent, the way a real one sags."
   },
   {
-    id: "handfan",
-    key: "4",
-    name: "Old-school Hand Fan",
-    short: "Hand Fan",
-    zh: "手摇芭蕉扇",
-    icon: "handfan",
-    renderer: "handfan",
-    palette: { main: "#78aa70", trim: "#d99a4e", pale: "#f0e0a6" },
-    blades: 1,
-    rpm: [38, 190],
-    cooling: 4.1,
-    gears: [
-      { label: "1 · LAZY", level: .28 },
-      { label: "2 · FLAP", level: .61 },
-      { label: "MAX · PANIC", level: 1 }
-    ],
-    mode: { label: "CLICK FOR EXTRA FLAP", short: "EXTRA FLAP", kind: "manual" },
-    sound: { air: .31, cutoff: [420, 2900], rumble: .015, motor: [34, 74], tone: .012 },
-    caption: "Move over the stage to aim it. Click for an extra-hard flap that shakes loose leaves and cartoon sweat drops."
-  }
+    id:"hand", name:"Palm-leaf Fan", zh:"蒲扇", icon:"hand",
+    gears:["slow","brisk","frantic"], keys:["1","2","3"], gearLevel:[.35,.65,1], gearLabel:"wrist",
+    blades:1, rpm:[26,104], unit:"swings/min", spin:{up:.9,down:1.6},
+    manual:true, shake:.20, cool:2.2, paper:.65,
+    air :{g:.05,k:1.4,f:[240,900],q:.7},
+    res :{g:.02,k:1.5,f:[300,700],q:1.4},
+    rum :{g:.02,k:1.2,f:[60,100],q:1.0},
+    tone:{g:.006,k:1.8,harm:[1,.3],beat:0},
+    note:"No motor, so there is nothing to hold a steady tone. Each swing fires its own burst of " +
+         "noise through a band-pass that sweeps up and back down — a whoosh is a filter moving, not " +
+         "a sample. Most of the air comes forward at you, the rest wipes across. Click or drag the " +
+         "stage to fan it yourself."
+  },
 ];
 
-export const AMBIENT_TEMPERATURE = 38;
-export const FREEZE_TEMPERATURE = 16;
+export const PARTIALS = 5;
+export const AMBIENT = 34.0;   // it is, as reported, extremely hot
+
+// ── reading the table ───────────────────────────────────────────────────────
+export const clamp = (v,a,b) => v < a ? a : v > b ? b : v;
+export const lerp  = (a,b,t) => a + (b-a)*t;
+export const expLerp = (a,b,t) => a * Math.pow(b/a, t);   // the honest way to sweep a frequency
+export const curve = (lv,k) => Math.pow(clamp(lv,0,1), k);
+// A stopped motor is stopped. Without the taper the rotor would snap to its idle
+// speed the instant the level leaves zero, and the blade-pass tone with it.
+export const rpmOf = (d,lv) => lv < 1e-4 ? 0 : expLerp(d.rpm[0], d.rpm[1], lv) * Math.min(1, lv/.10);

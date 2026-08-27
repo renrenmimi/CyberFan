@@ -1,119 +1,108 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f3dca5">
-  <meta name="description" content="A hand-drawn cartoon cooling toy with four noisy appliances and a very optimistic thermometer.">
-  <title>CyberFan! — a cartoon cooling contraption</title>
-  <link rel="icon" href="favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="styles.css?v=portfolio-polish-2">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CyberFan — a hand-drawn cooling department</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<meta name="description" content="Four cartoon appliances drawn in 1940s cel style, with gears, squash-and-stretch and sound built from oscillators and filtered noise." />
+<link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="film-grain" aria-hidden="true"></div>
-  <div class="frost-vignette" id="frostVignette" aria-hidden="true">
-    <i></i><i></i><i></i><i></i>
+<div class="wrap">
+
+  <header class="marquee">
+    <span class="sunburst" aria-hidden="true"></span>
+    <p class="studio">The Department of Imaginary Cooling presents</p>
+    <h1>Cyber<em>Fan</em><b>!</b></h1>
+    <p class="billing">A cartoon contraption for seriously hot days</p>
+    <p class="seal" aria-label="One hundred percent placebo cooled"><b>100%</b><span>placebo cooled</span></p>
+  </header>
+
+  <div class="tabs" id="tabs" role="tablist" aria-label="Appliance"></div>
+
+  <div class="stage">
+    <p class="slate"><span class="scene" id="sceneNo">Scene 1</span><b id="statusLine">taking a nap</b></p>
+    <canvas id="scene" width="1180" height="700" role="img"
+            aria-label="A hand-drawn room with a wall clock, calendar and thermometer, and the selected appliance blowing air toward you"></canvas>
+    <button class="curtain" id="curtain" type="button">
+      <span class="card">
+        <span class="pre">picture &amp; sound ready</span>
+        <b>Start the show</b>
+        <span class="say">Sound only begins once you interact &mdash; that is the browser's rule,
+          not ours. One press wakes the motor room up.</span>
+        <span class="bigred" aria-hidden="true"><i></i></span>
+      </span>
+    </button>
   </div>
 
-  <main class="page-shell">
-    <header class="show-card">
-      <div class="sunburst" aria-hidden="true"></div>
-      <p class="studio-line">RENREN PICTURES PRESENTS</p>
-      <h1><span>Cyber</span>Fan!</h1>
-      <p class="subtitle">A CARTOON CONTRAPTION FOR SERIOUSLY HOT DAYS</p>
-      <div class="edition-seal" aria-label="Placebo cooled"><b>100%</b><span>PLACEBO<br>COOLED</span></div>
-    </header>
+  <div class="plate">
+    <div class="group" data-slot="speed">
+      <span class="cap" id="capSpeed">speed</span>
+      <div class="row" id="keys" role="group" aria-labelledby="capSpeed"></div>
+    </div>
 
-    <nav class="appliance-switcher" aria-label="Choose an appliance">
-      <div class="switcher-title"><span>Tonight's Cooling Cast</span><small>Press keys 1–4</small></div>
-      <div class="appliance-tabs" id="applianceTabs" role="listbox"></div>
-    </nav>
-
-    <section class="play-layout">
-      <div class="main-act">
-        <section class="cartoon-stage" id="cartoonStage" aria-label="Animated cooling appliance">
-          <div class="stage-label"><span id="sceneNumber">SCENE 1</span><b id="machineStatus" role="status" aria-live="polite">TAKING A NAP</b></div>
-          <canvas id="sceneCanvas" width="960" height="600"></canvas>
-          <div class="caption-card">
-            <div>
-              <h2 id="applianceName">Retro Oscillating Fan</h2>
-              <p id="applianceChinese">经典摇头电风扇</p>
-            </div>
-            <p id="applianceCaption">Pull the brass pin, pick a clacky gear, and watch the red ribbon tell you exactly how windy it is.</p>
-          </div>
-          <button class="start-curtain" id="startCurtain" type="button">
-            <span class="curtain-copy"><small>PICTURE &amp; SOUND READY</small><strong>START THE SHOW!</strong><em>Click once to wake up browser audio</em></span>
-            <span class="big-red-button" aria-hidden="true"><i></i></span>
-          </button>
-        </section>
-
-        <section class="control-cabinet" aria-label="Cartoon appliance controls">
-          <div class="cabinet-screws" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
-          <div class="power-control">
-            <span class="control-name">MASTER<br>SWITCH</span>
-            <button id="powerButton" class="power-plunger" type="button" aria-pressed="false"><i></i><b>OFF</b></button>
-          </div>
-
-          <div class="gear-control">
-            <div class="control-heading"><span class="control-name">MOTOR SPEED</span><output id="speedOutput" aria-live="polite">GEAR 1 · BREEZE</output></div>
-            <div class="mechanical-gears" id="gearButtons" role="group" aria-label="Motor speed"></div>
-          </div>
-
-          <div class="mode-control">
-            <span class="control-name">SPECIAL<br>GIMMICK</span>
-            <button id="modeButton" class="pull-control" type="button" aria-pressed="false">
-              <span class="pull-knob"></span><b id="modeLabel">OSCILLATE</b><small id="modeHint">PULL</small>
-            </button>
-          </div>
-
-          <div class="volume-control">
-            <div class="control-heading"><label class="control-name" for="volumeRange">RACKET VOLUME</label><button class="mute-button" id="muteButton" type="button" aria-pressed="false"><span class="speaker-icon" aria-hidden="true"><i></i></span><b>MUTE</b></button></div>
-            <div class="volume-knob"><input id="volumeRange" type="range" min="0" max="100" value="55"><output id="volumeOutput">55</output></div>
-          </div>
-        </section>
+    <div class="group" data-slot="swing" id="grpLatch">
+      <span class="cap">swing</span>
+      <div class="row">
+        <button class="ctl latch" id="latch" type="button" aria-pressed="false">
+          <span class="pin" aria-hidden="true"></span>
+          <span class="txt">pin</span>
+        </button>
       </div>
+    </div>
 
-      <aside class="cooling-gauge" aria-label="Placebo cooling feedback">
-        <div class="gauge-sign"><span>HOW COOL</span><b>DO YOU FEEL?</b></div>
-        <div class="room-info" aria-label="Local date and time">
-          <time class="wall-calendar" id="wallCalendar">
-            <span class="calendar-rings" aria-hidden="true"><i></i><i></i></span>
-            <span class="calendar-page" id="calendarPage"><b id="calendarWeekday">TODAY</b><strong id="calendarDay">--</strong><small><span id="calendarMonth">---</span> <span id="calendarYear">----</span></small></span>
-          </time>
-          <time class="wall-clock" id="wallClock"><span class="clock-label">LOCAL TIME</span><strong><span id="clockHour">--</span><i>:</i><span id="clockMinute">--</span></strong><small id="clockSecond">-- SEC</small></time>
-        </div>
-        <div class="room-conditions" aria-label="Simulated room conditions">
-          <div class="comfort-tag"><span>SIM. HUMIDITY</span><b id="humidityValue">54%</b></div>
-          <div class="wind-vane"><span>VIRTUAL WIND</span><b id="windDirection"><i aria-hidden="true"></i> AT YOU</b></div>
-        </div>
-        <div class="thermometer-wrap" id="thermometerWrap">
-          <div class="ice-cap" aria-hidden="true"><i></i><i></i><i></i></div>
-          <div class="thermometer">
-            <div class="ticks" aria-hidden="true"><span>40°</span><span>30°</span><span>20°</span><span>10°</span></div>
-            <div class="tube"><i id="mercury"></i></div>
-            <div class="bulb"></div>
-            <div class="glass-shine"></div>
-          </div>
-          <div class="cracks" aria-hidden="true"><i></i><i></i><i></i></div>
-        </div>
-        <div class="temperature-card"><strong><span id="temperatureValue">38.0</span>°C</strong><b id="temperatureMood">TOO DARN HOT!</b></div>
-        <div class="cool-meter"><span>MENTAL CHILL</span><div><i id="chillFill"></i></div><b id="chillScore">0%</b></div>
-        <canvas id="soundMeter" width="320" height="105" aria-label="Animated sound meter"></canvas>
-        <dl class="readouts">
-          <div><dt>WIND</dt><dd id="windReadout">0.0 m/s</dd></div>
-          <div><dt>MOTOR</dt><dd id="rpmReadout">0 rpm</dd></div>
-          <div><dt>MODE</dt><dd id="modeReadout">standby</dd></div>
-        </dl>
-        <p class="disclaimer">No actual room temperature is measured. This thermometer is a trained performer.</p>
-      </aside>
-    </section>
+    <div class="group" data-slot="mode" id="grpHeat">
+      <span class="cap" id="capMode">air</span>
+      <div class="row">
+        <button class="ctl flip" id="heat" type="button" aria-pressed="false">
+          <span class="knobface" aria-hidden="true"></span>
+          <span class="txt" id="heatText">cold</span>
+        </button>
+      </div>
+    </div>
 
-    <footer>
-      <p><kbd>1</kbd>–<kbd>4</kbd> appliance &nbsp; <kbd>↑</kbd><kbd>↓</kbd> speed &nbsp; <kbd>SPACE</kbd> power &nbsp; <kbd>M</kbd> special gimmick</p>
-      <p>DRAWN WITH CODE &amp; QUESTIONABLE THERMODYNAMICS · <a href="https://github.com/renrenmimi">WEIREN FENG</a></p>
-    </footer>
-  </main>
+    <div class="group" data-slot="vol">
+      <span class="cap">sound</span>
+      <div class="row">
+        <button class="ctl dial" id="dial" type="button" role="slider"
+                aria-label="Volume" aria-valuemin="0" aria-valuemax="100" aria-valuenow="70"
+                aria-valuetext="70 percent">
+          <span class="needle" aria-hidden="true"></span>
+        </button>
+        <button class="ctl mute" id="mute" type="button" aria-pressed="false" aria-label="Mute sound">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+               stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path id="muteOn" d="M4 9.5h3.5L12 5.5v13L7.5 14.5H4Z" fill="currentColor" fill-opacity=".18"/>
+            <path id="muteWave" d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/>
+            <path id="muteX" d="M16 9.5l5 5m0-5l-5 5" style="display:none"/>
+          </svg>
+        </button>
+      </div>
+    </div>
 
-  <script type="module" src="app.js?v=portfolio-polish-3"></script>
+    <div class="readout">
+      <p class="chip"><span class="bulb" id="bRun"></span><span class="k">state</span><span class="v" id="vPhase">off</span></p>
+      <p class="chip"><span class="k">speed</span><span class="v" id="vGear">off</span></p>
+      <p class="chip"><span class="k" id="kRpm">rpm</span><span class="v" id="vRpm">0</span></p>
+      <p class="chip" id="chipAux"><span class="bulb" id="bAux"></span><span class="k" id="kAux">humidity</span><span class="v" id="vAux">72%</span></p>
+      <p class="chip"><span class="k">you feel</span><span class="v" id="vTemp">34.0&deg;</span></p>
+    </div>
+  </div>
+
+  <p class="visually-hidden" id="live" role="status" aria-live="polite"></p>
+  <p class="visually-hidden" id="wallTime"></p>
+  <p class="note" id="note"></p>
+
+  <footer>
+    <p><kbd>1</kbd>&ndash;<kbd>4</kbd> appliance &middot; <kbd>&uarr;</kbd><kbd>&darr;</kbd> speed &middot;
+       <kbd>Space</kbd> on / off &middot; <kbd>P</kbd> pin &middot; <kbd>H</kbd> air &middot;
+       <kbd>M</kbd> mute &middot; click the stage to fan by hand</p>
+    <p>&copy; 2026 Weiren Feng &middot; <a href="https://github.com/renrenmimi">github.com/renrenmimi</a></p>
+  </footer>
+
+</div>
+
+<script type="module" src="app.js"></script>
 </body>
 </html>

@@ -1,98 +1,96 @@
-import { readFile, access } from "node:fs/promises";
-import { DEVICES } from "./devices.mjs";
-import { createRoomClock, getRoomDateParts, getRoomTimeParts, localISODate } from "./room-time.mjs";
+// Static checks on the appliance table and the maths that reads it. The table is
+// imported, not scraped, so it cannot drift from what the app runs; the coverage
+// checks still read app.js as text, because that is where the drawing lives.
+//   node verify.mjs
+import { readFileSync } from "node:fs";
+import { DEVICES, rpmOf } from "./devices.mjs";
 
-const requiredFiles = [
-  "index.html",
-  "styles.css",
-  "app.js",
-  "devices.mjs",
-  "room-time.mjs",
-  "favicon.svg",
-  "assets/appliance-icons.svg"
-];
+const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
 
-const failures = [];
-const expect = (condition, message) => {
-  if (!condition) failures.push(message);
-};
+let failed = 0, checked = 0;
+const ok = (cond, label) => { checked++; if (!cond){ failed++; console.log("  FAIL  " + label); } };
 
-await Promise.all(requiredFiles.map(async (file) => {
-  try {
-    await access(new URL(file, import.meta.url));
-  } catch {
-    failures.push(`Missing required file: ${file}`);
+// which icons and which draw branches actually exist in the file
+const iconSection = app.slice(app.indexOf("const ICONS = {"), app.indexOf("\n};", app.indexOf("const ICONS = {")));
+const iconKeys = [...iconSection.matchAll(/^\s*(\w+):\s*$/gm)].map(m => m[1]);
+const drawn = [...app.matchAll(/d\.id === "(\w+)"\)\s+draw/g)].map(m => m[1]);
+
+console.log("DEVICES: " + DEVICES.length + "  ICONS: " + iconKeys.join(",") + "\n");
+
+ok(DEVICES.length <= 9, "at most nine appliances, so every one has a digit key");
+ok(new Set(DEVICES.map(d => d.id)).size === DEVICES.length, "appliance ids are unique");
+
+for (const d of DEVICES){
+  const t = "[" + d.id + "] ";
+  ok(iconKeys.includes(d.icon), t + "an icon named '" + d.icon + "' exists");
+  ok(drawn.includes(d.id),      t + "the render loop has a branch for it");
+  ok(typeof d.note === "string" && d.note.length > 40, t + "has a caption explaining itself");
+  ok(typeof d.unit === "string", t + "declares the unit its readout is in");
+  ok(typeof d.gearLabel === "string", t + "names its own speed control");
+
+  ok(d.gears.length === d.gearLevel.length, t + "gear labels match gear levels");
+  ok(d.gearLevel.every((v,i) => i === 0 || v > d.gearLevel[i-1]), t + "gear levels ascend");
+  ok(d.gearLevel.at(-1) === 1, t + "top gear is full throttle");
+  ok(d.gearLevel[0] > 0, t + "lowest gear is above zero");
+
+  // expLerp divides by its first endpoint, so nothing may start at zero
+  for (const [k, path] of Object.entries({air:d.air, res:d.res, rum:d.rum}))
+    ok(path.f[0] > 0 && path.f[1] > path.f[0], t + k + " sweep is positive and rising");
+  ok(d.rpm[0] > 0 && d.rpm[1] > d.rpm[0], t + "rpm range is positive and rising");
+  if (d.whine) ok(d.whine.f0[0] > 0 && d.whine.lp[0] > 0, t + "whine ranges are positive");
+
+  // a two-position switch needs a second cooling figure to switch to
+  if (d.mode){
+    ok(typeof d.mode.on === "string" && typeof d.mode.off === "string", t + "switch has both labels");
+    ok(typeof d.coolAlt === "number", t + "switch has a second cooling figure");
+    ok(d.coolAlt !== d.cool, t + "the two switch positions actually differ");
   }
-}));
+  ok(typeof d.shake === "number" && d.shake >= 0 && d.shake <= 1, t + "shake is a sane fraction");
+  ok(Math.abs(d.cool) <= 12, t + "cooling claim stays inside the thermometer's scale");
 
-const [html, css, js, icons] = await Promise.all([
-  readFile(new URL("index.html", import.meta.url), "utf8"),
-  readFile(new URL("styles.css", import.meta.url), "utf8"),
-  readFile(new URL("app.js", import.meta.url), "utf8"),
-  readFile(new URL("assets/appliance-icons.svg", import.meta.url), "utf8")
-]);
+  // a stopped motor must be stopped, and must leave zero continuously
+  ok(rpmOf(d, 0) === 0, t + "rpm is exactly zero when off");
+  ok(rpmOf(d, .001) < d.rpm[0] * .02, t + "rpm leaves zero without a jump");
+  let mono = true, prev = -1;
+  for (let lv = 0; lv <= 1.0001; lv += .01){ const r = rpmOf(d, lv); if (r < prev - 1e-9) mono = false; prev = r; }
+  ok(mono, t + "rpm rises monotonically with the level");
 
-expect(DEVICES.length === 4, "CyberFan must have exactly four appliances.");
-expect(new Set(DEVICES.map(({ id }) => id)).size === DEVICES.length, "Appliance ids must be unique.");
-expect(DEVICES.map(({ key }) => key).join("") === "1234", "Appliance shortcuts must be 1–4.");
+  // partials must stay inside the audible band or they alias
+  const f0 = rpmOf(d, 1)/60 * d.blades, top = f0 * d.tone.harm.length;
+  ok(f0 > 0 && f0 < 3000, t + "blade pass at full is " + f0.toFixed(0) + " Hz");
+  ok(top < 15000, t + "highest partial is " + top.toFixed(0) + " Hz");
 
-const sampleDate = new Date(2026, 7, 27, 15, 4, 5, 250);
-const dateParts = getRoomDateParts(sampleDate, "en-US");
-const timeParts = getRoomTimeParts(sampleDate, "en-US");
-expect(localISODate(sampleDate) === "2026-08-27", "Calendar must produce the visitor's local ISO date.");
-expect(dateParts.day === "27" && dateParts.month === "AUG" && dateParts.year === "2026", "Calendar parts are incorrect.");
-expect(timeParts.hour === "15" && timeParts.minute === "04" && timeParts.second === "05", "Clock parts are incorrect.");
+  // the continuous layer, the transients and the limiter share one output
+  const partials = d.tone.harm.reduce((a,b) => a+b, 0) * (d.tone.beat ? 1.8 : 1);
+  const peak = d.air.g + d.res.g + d.rum.g + d.tone.g*partials + (d.whine ? d.whine.g : 0);
+  ok(peak < .85, t + "summed peak gain is " + peak.toFixed(3));
 
-let scheduledTask = null;
-let cancelledTimer = null;
-let renderCount = 0;
-const testClock = createRoomClock(() => { renderCount += 1; }, {
-  now: () => sampleDate,
-  schedule: (callback, delay) => {
-    scheduledTask = { callback, delay };
-    return 17;
-  },
-  cancel: (timer) => { cancelledTimer = timer; }
-});
-testClock.start();
-expect(testClock.running && renderCount === 1, "Clock must render immediately when started.");
-expect(scheduledTask?.delay === 750, "Clock must schedule its next update on the next second boundary.");
-scheduledTask?.callback();
-expect(renderCount === 2, "Clock must update on its scheduled tick.");
-testClock.stop();
-expect(!testClock.running && cancelledTimer === 17, "Clock cleanup must cancel its active timer.");
+  ok(d.spin.down > d.spin.up, t + "coast-down is slower than spin-up");
 
-for (const device of DEVICES) {
-  expect(device.gears?.length === 3, `${device.id} must have three mechanical speeds.`);
-  expect(device.renderer, `${device.id} needs a canvas renderer.`);
-  expect(device.palette?.main && device.palette?.trim, `${device.id} needs a cartoon palette.`);
-  expect(device.sound?.cutoff?.length === 2, `${device.id} needs Web Audio filter bounds.`);
-  expect(icons.includes(`id="${device.icon}"`), `Missing SVG symbol for ${device.id}.`);
+  if (d.cycle){
+    ok(d.cycle.ramp * 2 < Math.min(d.cycle.on, d.cycle.off), t + "cycle ramp fits inside both phases");
+    ok(d.cycle.affects.every(k => ["air","res","rum","tone"].includes(k)), t + "cycle targets real paths");
+  }
 }
 
-for (const reference of ["styles.css", "app.js", "favicon.svg"]) {
-  expect(html.includes(reference), `index.html must reference ${reference}.`);
+// ── level dynamics ──────────────────────────────────────────────────────────
+// The same integration the fixed step runs. A one-pole target is 95% reached at
+// 3τ, so a figure far off that means the loop and the table disagree.
+for (const d of DEVICES){
+  const dt = 1/120;
+  for (const [gi, target] of d.gearLevel.entries()){
+    let lv = 0, t = 0;
+    while (lv < target*.95 && t < 60){ lv += (target - lv) * (1 - Math.exp(-dt/d.spin.up)); t += dt; }
+    const tau3 = 3*d.spin.up;
+    ok(t > tau3*.8 && t < tau3*1.35,
+       "[" + d.id + "] gear " + d.gears[gi] + " reaches 95% in " + t.toFixed(2) + "s (3τ = " + tau3.toFixed(2) + "s)");
+  }
+  let lv = 1, t = 0;
+  while (lv > .05 && t < 90){ lv += (0 - lv) * (1 - Math.exp(-dt/d.spin.down)); t += dt; }
+  ok(t > 3*d.spin.up, "[" + d.id + "] coasting to a stop (" + t.toFixed(1) + "s) outlasts spin-up");
 }
 
-expect(js.includes("AudioContext"), "Web Audio API setup is missing.");
-expect(js.includes("requestAnimationFrame"), "Animation loop must use requestAnimationFrame.");
-expect(js.includes("Math.min(1 / 120, remaining)"), "Simulation timestep must be bounded.");
-expect(js.includes("window.addEventListener(\"keydown\""), "Keyboard operation is missing.");
-expect(js.includes("pagehide") && js.includes("roomClock.stop()"), "Clock timer cleanup hook is missing.");
-expect(js.includes("reducedMotionQuery"), "Canvas reduced-motion handling is missing.");
-expect(html.includes("wallCalendar") && html.includes("wallClock"), "Room calendar or clock markup is missing.");
-expect(html.includes("aria-live=\"polite\""), "Live appliance state announcement is missing.");
-expect(html.includes("muteButton"), "Obvious sound mute control is missing.");
-expect(css.includes("prefers-reduced-motion"), "Reduced-motion fallback is missing.");
-expect(css.includes(".frost-vignette"), "Cartoon frost vignette is missing.");
-expect(css.includes("--control-height") && css.includes("--touch-target"), "Shared control sizing tokens are missing.");
-expect(css.includes("button:focus-visible"), "Keyboard focus styles are missing.");
-expect(css.includes("@media (max-width: 520px)"), "Mobile layout breakpoint is missing.");
-
-if (failures.length) {
-  console.error(`CyberFan self-check failed (${failures.length}):`);
-  for (const failure of failures) console.error(`- ${failure}`);
-  process.exitCode = 1;
-} else {
-  console.log(`CyberFan self-check passed: ${DEVICES.length} appliances, ${requiredFiles.length} required files, local time lifecycle, keyboard, responsive, motion, and audio hooks present.`);
-}
+console.log("\n" + (checked - failed) + "/" + checked + " checks passed");
+process.exit(failed ? 1 : 0);
