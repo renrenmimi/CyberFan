@@ -355,6 +355,7 @@
   </div>
 
   <p class="visually-hidden" id="live" role="status" aria-live="polite"></p>
+  <p class="visually-hidden" id="wallTime"></p>
   <p class="note" id="note"></p>
 
   <footer>
@@ -478,7 +479,8 @@ const S = {
   rotorAngle: 0, headPhase: 0, wobbleT: 0, drawFrame: 0,
   cycleOn: true, cycleT: 0, cycleGain: 1,
   swingPhase: 0, swingSign: 1, handBoost: 0, handX: 566, pointer: {x:0, y:0, inside:false},
-  dripT: 0, ringT: 0, flyT: 0, camKick: 0, temp: AMBIENT, frost: 0, started: false,
+  dripT: 0, ringT: 0, flyT: 0, dustT: 0, camKick: 0,
+  temp: AMBIENT, humid: .72, frost: 0, started: false,
 };
 
 // ── audio ───────────────────────────────────────────────────────────────────
@@ -634,16 +636,56 @@ function pushAudio(){
 // ── canvas ──────────────────────────────────────────────────────────────────
 const cv = document.getElementById("scene");
 const g = cv.getContext("2d");
-const W = 1180, H = 700, FLOOR = 592;
+
+// Scene geometry is computed, never typed in. The narrow layout is a portrait
+// framing of the same room with its own furniture positions — not the landscape
+// composition scaled down, which is what a 328x199 letterbox looked like.
+let W = 1180, H = 700, FLOOR = 592, REACH = 640;
+const FAN = {}, AC = {}, DRY = {}, HAND = {}, WALL = {};
+let portraitScene = false;
+
+function relayout(portrait){
+  portraitScene = portrait;
+  W = portrait ? 760 : 1180;
+  H = portrait ? 980 : 700;
+  FLOOR = Math.round(H * (portrait ? .80 : .846));
+  REACH = Math.round(Math.hypot(W, H) * .47);
+  WALL.rail = portrait ? Math.round(H*.30) : 96;
+
+  if (portrait){
+    WALL.thermo = {x:42,  y:56,  w:100, h:252};
+    WALL.clock  = {cx:380, cy:158, r:72};
+    WALL.cal    = {x:600, y:56,  w:120, h:150};
+    WALL.tag    = {x:196, y:WALL.rail};
+    FAN.bx = 380;  FAN.hy = FLOOR - 300; FAN.cage = 92;
+    AC.x = 176; AC.y = 352; AC.w = 408; AC.h = 190;
+    DRY.cx = 392; DRY.cy = 500;
+    HAND.px = 380; HAND.py = FLOOR + 4;
+  } else {
+    WALL.thermo = {x:48,  y:156, w:104, h:296};
+    WALL.clock  = {cx:236, cy:206, r:64};
+    WALL.cal    = {x:944, y:130, w:134, h:162};
+    WALL.tag    = {x:806, y:WALL.rail};
+    FAN.bx = 470;  FAN.hy = FLOOR - 322; FAN.cage = 98;
+    AC.x = 400; AC.y = 130; AC.w = 352; AC.h = 172;
+    DRY.cx = 596; DRY.cy = 322;
+    HAND.px = 566; HAND.py = FLOOR - 4;
+  }
+  HAND.leafY = HAND.py - 212;
+}
 
 function fitCanvas(){
+  const box = cv.parentElement.getBoundingClientRect().width || 1180;
+  relayout(box < 680);
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  cv.width = W*dpr; cv.height = H*dpr;
+  cv.width = Math.round(W*dpr); cv.height = Math.round(H*dpr);
   cv.style.aspectRatio = W + " / " + H;
   g.setTransform(dpr,0,0,dpr,0,0);
   g.lineJoin = "round"; g.lineCap = "round";
+  BITS.length = 0; CLOTH.ready = false;
+  if (S.handX === undefined || !portraitScene) S.handX = HAND.px;
+  S.handX = clamp(S.handX, 150, W-150);
 }
-fitCanvas();
 addEventListener("resize", fitCanvas, {passive:true});
 
 // ── hand-drawn primitives ───────────────────────────────────────────────────
@@ -781,103 +823,186 @@ function drawRoom(){
 
   // a picture rail and a sun-bleached patch, so the wall is not a flat field
   g.globalAlpha = .5;
-  taperLine([[-10,96],[W*.5,92],[W+10,97]], 4, 3, "rgba(207,174,118,.9)", 1.2, 12);
+  taperLine([[-10,WALL.rail],[W*.5,WALL.rail-4],[W+10,WALL.rail+1]], 4, 3, "rgba(207,174,118,.9)", 1.2, 12);
   g.globalAlpha = 1;
-  const patch = g.createRadialGradient(W*.78, 210, 20, W*.78, 210, 260);
+  const px2 = W*.78, py2 = H*.30;
+  const patch = g.createRadialGradient(px2, py2, 20, px2, py2, 260);
   patch.addColorStop(0,"rgba(255,253,245,.42)"); patch.addColorStop(1,"rgba(255,253,245,0)");
-  g.fillStyle = patch; g.fillRect(W*.78-260, -50, 520, 520);
+  g.fillStyle = patch; g.fillRect(px2-260, py2-260, 520, 520);
 }
 
-// ── a calendar on the wall, which is how you know where the wind is going ───
-// Nothing sells "blowing at the camera" like a piece of paper in the room lifting
-// toward the lens instead of sideways.
+// ── the room's information wall ─────────────────────────────────────────────
+// Clock, calendar and thermometer read as three objects hung on one wall rather
+// than as a dashboard. The date and the time are the visitor's own; the
+// temperature and the comfort reading are openly part of the simulation and the
+// plaque says so.
+const FMT = {
+  weekday: new Intl.DateTimeFormat(undefined, {weekday:"short"}),
+  month:   new Intl.DateTimeFormat(undefined, {month:"long"}),
+  day:     new Intl.DateTimeFormat(undefined, {day:"numeric"}),
+  year:    new Intl.DateTimeFormat(undefined, {year:"numeric"}),
+  time:    new Intl.DateTimeFormat(undefined, {hour:"2-digit", minute:"2-digit"}),
+};
+const CLOCK = {parts:null, dayKey:"", minuteKey:"", timer:0};
+
+// Formatting is the expensive part, so it happens when the day or the minute
+// turns over — not sixty times a second. The hands read the clock directly.
+function refreshDate(now){
+  const dayKey = now.getFullYear() + "-" + now.getMonth() + "-" + now.getDate();
+  if (dayKey !== CLOCK.dayKey){
+    CLOCK.dayKey = dayKey;
+    CLOCK.parts = {
+      weekday: FMT.weekday.format(now).toUpperCase(),
+      month:   FMT.month.format(now).toUpperCase(),
+      day:     FMT.day.format(now),
+      year:    FMT.year.format(now),
+    };
+  }
+  const minuteKey = now.getHours() + ":" + now.getMinutes();
+  if (minuteKey !== CLOCK.minuteKey){
+    CLOCK.minuteKey = minuteKey;
+    const el = document.getElementById("wallTime");
+    if (el && CLOCK.parts)
+      el.textContent = "Wall clock reads " + FMT.time.format(now) + ", " +
+                       CLOCK.parts.weekday + " " + CLOCK.parts.day + " " + CLOCK.parts.month;
+  }
+}
+function startClock(){ refreshDate(new Date()); stopClock();
+                       CLOCK.timer = setInterval(() => refreshDate(new Date()), 15000); }
+function stopClock(){ if (CLOCK.timer){ clearInterval(CLOCK.timer); CLOCK.timer = 0; } }
+addEventListener("pagehide", stopClock);
+document.addEventListener("visibilitychange", () => document.hidden ? stopClock() : startClock());
+
+// a school-room enamel clock, hands driven by the visitor's own local time
+function drawClock(){
+  const {cx, cy, r} = WALL.clock;
+  const now = new Date();
+  cel(ring(cx, cy+5, r+10, 24), "rgba(36,26,18,.13)", 0, {seed:1500});
+  cel(ring(cx, cy, r+10, 26), C.brown, 4.6, {seed:1501});
+  cel(ring(cx, cy, r+2, 26), C.bone, 3, {seed:1502});
+  cel(ring(cx, cy, r, 26), C.white, 3.2, {seed:1503});
+
+  for (let i = 0; i < 12; i++){
+    const a = i/12*Math.PI*2 - Math.PI/2, big = i % 3 === 0;
+    taperLine([[cx + Math.cos(a)*r*(big ? .70 : .80), cy + Math.sin(a)*r*(big ? .70 : .80)],
+               [cx + Math.cos(a)*r*.90,               cy + Math.sin(a)*r*.90]],
+              big ? 5.5 : 2.6, big ? 4 : 2, C.ink, .4, 1510+i);
+  }
+  const sec = now.getSeconds();                       // a mechanical hand ticks
+  const min = now.getMinutes() + sec/60;
+  const hr  = (now.getHours() % 12) + min/60;
+  const hand = (turn, len, w0, w1, col, seed) => {
+    const a = turn*Math.PI*2 - Math.PI/2;
+    taperLine([[cx - Math.cos(a)*r*.15, cy - Math.sin(a)*r*.15],
+               [cx + Math.cos(a)*r*len, cy + Math.sin(a)*r*len]], w0, w1, col, .3, seed);
+  };
+  hand(hr/12,  .50, 9.5, 4,   C.ink, 1530);
+  hand(min/60, .78, 6.5, 2.8, C.ink, 1532);
+  if (!calm) hand(sec/60, .86, 2.4, 2.4, C.red, 1534);
+  cel(ring(cx, cy, 5.5, 8), C.red, 2.6, {seed:1540});
+}
+
+// A tear-off pad showing today. The bottom sheet lifts toward the lens, which is
+// the cheapest possible proof of which way the air is going.
 function drawCalendar(lv){
-  const x = 944, y = 130, w = 134, h = 162;
-  const lift = (.5 + .5*Math.sin(S.wobbleT*5.6)) * Math.min(1.1, lv) * 76;
+  const {x, y, w, h} = WALL.cal;
+  const p = CLOCK.parts;
+  if (!p) return;
+  const lift = (calm ? .35 : .5 + .5*Math.sin(S.wobbleT*5.6)) * Math.min(1.1, lv) * (h*.46);
+  const head = Math.round(h*.20);
 
   cel(box(x+5, y+7, w, h, 7), "rgba(36,26,18,.12)", 0, {seed:1401});
   cel(box(x, y, w, h, 7), C.cream, 3.6, {seed:1402});
-  cel(box(x, y, w, 32, 7), C.red, 3.2, {seed:1404});
-  g.fillStyle = C.white; g.font = "14px " + FONT; g.textAlign = "center";
-  g.fillText("AUGUST", x + w/2, y + 22);
+  cel(box(x, y, w, head, 7), C.red, 3.2, {seed:1404});
+  g.textAlign = "center"; g.textBaseline = "alphabetic";
+  g.fillStyle = C.white; g.font = Math.round(h*.095) + "px " + FONT;
+  g.fillText(p.weekday, x + w/2, y + head*.70);
 
-  cel([[x+7, y+36],[x+w-7, y+36],
+  // the page in front, lifting and widening as it comes toward you
+  cel([[x+6, y+head+3],[x+w-6, y+head+3],
        [x+w-1 + lift*.44, y+h-6 - lift],[x+1 - lift*.44, y+h-6 - lift]],
       C.white, 3.2, {seed:1406, sharp:true});
-  g.strokeStyle = "rgba(36,26,18,.16)"; g.lineWidth = 1.6;
-  for (let r = 1; r <= 3; r++){
-    const yy = lerp(y+40, y+h-10-lift, r/3.6);
-    if (yy > y+46){ g.beginPath(); g.moveTo(x+18, yy); g.lineTo(x+w-18, yy); g.stroke(); }
-  }
-  for (let i = 0; i < 2; i++) cel(ring(x+20+i*(w-40), y+10, 4, 7), C.paper3, 2, {seed:1410+i});
+  const top = y + head + 3, bottom = y + h - 6 - lift, span = Math.max(28, bottom - top);
+  g.fillStyle = C.ink; g.font = "600 " + Math.round(Math.min(h*.30, span*.52)) + "px " + FONT;
+  g.fillText(p.day, x + w/2, top + span*.52);
+  g.fillStyle = C.ink2; g.font = Math.round(Math.min(h*.088, span*.16)) + "px " + FONT;
+  g.fillText(p.month, x + w/2, top + span*.76);
+  g.fillText(p.year,  x + w/2, top + span*.93);
+
+  for (let i = 0; i < 2; i++) cel(ring(x+18+i*(w-36), y+head*.42, 4, 7), C.paper3, 2, {seed:1410+i});
   g.textAlign = "left";
+}
+
+// ── a paper tag on a string: which way is the air actually going? ───────────
+// It leans away from whichever outlet is running, and hangs still when none is.
+function drawTag(lv){
+  const {x, y} = WALL.tag;
+  const o = outletOf(S.dev, lv);
+  const tx = x - o.x, ty = (y + 70) - o.y, m = Math.hypot(tx, ty) || 1;
+  const push = clamp(lv, 0, 1.1);
+  const idle = calm ? 0 : Math.sin(S.wobbleT*1.1) * .035;
+  const lean = clamp(-(tx/m) * push * .78, -.62, .62) +
+               (calm ? 0 : Math.sin(S.wobbleT*7.3) * .09 * push) + idle;
+
+  cel(ring(x, y, 4.5, 7), C.paper3, 2.4, {seed:1560});                  // the nail
+  g.save(); g.translate(x, y); g.rotate(lean);
+  taperLine([[0,0],[1,34],[0,64]], 3.2, 2.4, "rgba(36,26,18,.55)", .5, 1562);
+  cel(box(-25, 62, 50, 62, 8), C.cream, 3.4, {seed:1564});
+  cel(ring(0, 70, 4, 7), C.paper3, 2, {seed:1566});
+  g.fillStyle = C.ink2; g.font = "10px " + FONT; g.textAlign = "center";
+  g.fillText("DRAUGHT", 0, 96);
+  taperLine([[-15,104],[15,104]], 2, 2, "rgba(36,26,18,.30)", .4, 1568);
+  taperLine([[-15,112],[8,112]],  2, 2, "rgba(36,26,18,.30)", .4, 1569);
+  g.textAlign = "left"; g.restore();
 }
 
 // ── the thermometer on the wall ─────────────────────────────────────────────
 // Reads a number the page invents. It plunges, then frosts over, then cracks.
 function drawThermometer(){
-  const px = 48, py = 156, pw = 104, ph = 296;          // the plaque on the wall
-  const cx = px + 46, top = py + 42, bot = py + 232, tw = 26;
+  const {x:px, y:py, w:pw, h:ph} = WALL.thermo;
+  const cx = px + pw*.44, top = py + ph*.155, bot = py + ph*.63, tw = 26;
   const chill = clamp((AMBIENT - S.temp)/8, -.5, 1.25);
   const frozen = chill > .62;
 
-  cel(box(px+5, py+7, pw, ph, 16), "rgba(36,26,18,.14)", 0, {seed:300});
+  cel(box(px+5, py+7, pw, ph, 16), "rgba(36,26,18,.13)", 0, {seed:300});
   cel(box(px, py, pw, ph, 16), C.bone, 4.2, {seed:301});
   cel(box(px+8, py+8, pw-16, ph-16, 11), C.cream, 2.6, {seed:303});
-  cel(ring(cx, py+20, 7, 8), C.paper3, 2.6, {seed:305});                 // hanging screw
+  cel(ring(cx, py+ph*.062, 7, 8), C.paper3, 2.6, {seed:305});
   g.fillStyle = C.ink2; g.font = "12px " + FONT; g.textAlign = "center";
-  g.fillText("HOW HOT", cx + 14, py + 26);
+  g.fillText("HOW HOT", px + pw*.5, py + ph*.088);
 
-  cel(box(cx-tw/2, top, tw, bot-top, tw/2), C.white, 3, {seed:311});     // tube
-  cel(ring(cx, bot+24, 20, 11), C.white, 3, {seed:317});                 // bulb
+  cel(box(cx-tw/2, top, tw, bot-top, tw/2), C.white, 3, {seed:311});
+  cel(ring(cx, bot + pw*.20, pw*.19, 11), C.white, 3, {seed:317});
 
-  const t = clamp((S.temp - 22)/20, 0, 1);                               // a 22…42 scale
+  const t = clamp((S.temp - 22)/20, 0, 1);
   const colTop = bot - 8 - (bot-top-16)*t;
   const fluid = frozen ? C.blue : C.red;
   g.save();
   trace(box(cx-7, top+4, 14, bot-top-8, 7), true, .8, 331); g.clip();
   g.fillStyle = fluid; g.fillRect(cx-9, colTop, 18, bot);
   g.restore();
-  g.fillStyle = fluid; g.beginPath(); g.arc(cx, bot+24, 15, 0, 7); g.fill();
-  cel(ring(cx, bot+24, 15, 9), null, 2, {seed:337, stroke:"rgba(36,26,18,.4)"});
+  g.fillStyle = fluid; g.beginPath(); g.arc(cx, bot + pw*.20, pw*.145, 0, 7); g.fill();
+  cel(ring(cx, bot + pw*.20, pw*.145, 9), null, 2, {seed:337, stroke:"rgba(36,26,18,.4)"});
 
-  g.strokeStyle = C.ink2; g.lineWidth = 1.8;                             // scale
+  g.strokeStyle = C.ink2; g.lineWidth = 1.8;
   g.font = "10px " + FONT; g.textAlign = "left"; g.fillStyle = C.ink2;
   for (let i = 0; i <= 10; i++){
-    const yy = bot - 8 - (bot-top-16)*i/10, long = i%5 === 0;
-    g.beginPath(); g.moveTo(cx+tw/2+2, yy); g.lineTo(cx+tw/2+(long?14:8), yy); g.stroke();
-    if (long) g.fillText(String(22 + i*2), cx+tw/2+18, yy+3.5);
+    const yy = bot - 8 - (bot-top-16)*i/10, long = i % 5 === 0;
+    g.beginPath(); g.moveTo(cx+tw/2+2, yy); g.lineTo(cx+tw/2+(long?13:7), yy); g.stroke();
+    if (long) g.fillText(String(22 + i*2), cx+tw/2+17, yy+3.5);
   }
 
-  if (chill > .34){                                                      // ice on the glass
-    g.globalAlpha = clamp((chill-.34)/.5, 0, 1)*.9;
-    for (let i = 0; i < 7; i++){
-      const yy = lerp(bot+6, top+14, hash(i*3.1)), side = i%2 ? 1 : -1;
-      cel(blobPts(cx + side*(tw/2-2), yy, 4.5 + 3.5*hash(i*5.7), 7, 400+i), C.blueLt, 1.8,
-          {seed:410+i, amp:.9});
-    }
-    g.globalAlpha = 1;
-  }
-  if (frozen){                                                           // then it cracks
-    g.globalAlpha = clamp((chill-.62)/.28, 0, 1);
-    for (let i = 0; i < 3; i++){
-      const y0 = lerp(top+26, bot-30, hash(i*9.1+2)), f = i%2 ? 1 : -1;
-      cel([[cx-tw/2-3, y0],[cx-4, y0+9*f],[cx+5, y0+2],[cx+tw/2+3, y0+11*-f]],
-          null, 2.6, {seed:500+i, amp:1.3, sharp:true, stroke:C.ink});
-    }
-    g.globalAlpha = 1;
-  }
-  if (chill > .95){                                                      // and finally lets go
-    g.globalAlpha = clamp((chill-.95)/.25, 0, 1);
-    cel([[cx-tw/2-2, top-1],[cx+tw/2+2, top-1],[cx+tw/2-5, top+15],[cx+2, top+5],[cx-tw/2+4, top+18]],
-        C.bone, 2.8, {seed:520, sharp:true});
-    for (let i = 0; i < 5; i++){
-      const th = -2.1 + i*.42, r = 24 + 18*hash(i*4.4);
-      cel(blobPts(cx + Math.cos(th)*r, top - 8 + Math.sin(th)*r*.8, 4.5, 5, 530+i), C.blueLt, 2,
-          {seed:540+i, sharp:true});
-    }
-    g.globalAlpha = 1;
-  }
+  // comfort strip: a simulated humidity reading, labelled as one
+  const sy = py + ph - 44, sx = px + 14, sw = pw - 28;
+  taperLine([[sx, sy],[sx+sw, sy]], 3, 3, "rgba(36,26,18,.28)", .4, 350);
+  g.textAlign = "center"; g.font = Math.max(7, Math.round(pw*.076)) + "px " + FONT;
+  g.fillStyle = C.ink2;
+  ["MUGGY","FAIR","CRISP"].forEach((w2,i) => g.fillText(w2, sx + sw*(.16 + i*.34), sy + 15));
+  const hx = sx + sw * clamp(1 - S.humid, 0, 1);
+  cel([[hx, sy-11],[hx+5.5, sy-3],[hx-5.5, sy-3]], frozen ? C.blue : C.mustard, 2.2,
+      {seed:352, sharp:true});
+  g.font = "7.5px " + FONT; g.fillStyle = "rgba(36,26,18,.45)";
+  g.fillText("SIMULATED", px + pw*.5, py + ph - 6);
   g.textAlign = "left";
 }
 
@@ -885,19 +1010,19 @@ function drawThermometer(){
 function drawFrost(){
   const f = S.frost;
   if (f < .02) return;
-  const inset = 8 + 96*f;
+  const inset = 6 + 68*f;
 
   const vg = g.createLinearGradient(0,0,0,H);
-  vg.addColorStop(0,"rgba(201,230,238,"+(.55*f)+")"); vg.addColorStop(.5,"rgba(201,230,238,0)");
-  vg.addColorStop(1,"rgba(201,230,238,"+(.42*f)+")");
+  vg.addColorStop(0,"rgba(201,230,238,"+(.40*f)+")"); vg.addColorStop(.5,"rgba(201,230,238,0)");
+  vg.addColorStop(1,"rgba(201,230,238,"+(.32*f)+")");
   g.fillStyle = vg; g.fillRect(0,0,W,H);
   const hgd = g.createLinearGradient(0,0,W,0);
-  hgd.addColorStop(0,"rgba(201,230,238,"+(.55*f)+")"); hgd.addColorStop(.42,"rgba(201,230,238,0)");
-  hgd.addColorStop(.58,"rgba(201,230,238,0)"); hgd.addColorStop(1,"rgba(201,230,238,"+(.55*f)+")");
+  hgd.addColorStop(0,"rgba(201,230,238,"+(.40*f)+")"); hgd.addColorStop(.42,"rgba(201,230,238,0)");
+  hgd.addColorStop(.58,"rgba(201,230,238,0)"); hgd.addColorStop(1,"rgba(201,230,238,"+(.40*f)+")");
   g.fillStyle = hgd; g.fillRect(0,0,W,H);
 
   // Real frost grows as ferns: a spine with barbs off it. Blobs read as pebbles.
-  g.globalAlpha = clamp(f*1.3, 0, 1);
+  g.globalAlpha = clamp(f*.95, 0, 1);
   const fern = (x, y, dx, dy, len, s) => {
     const px = -dy, py = dx, lean = (hash(s)*2-1)*.5;
     const tip = [x + dx*len + px*lean*len*.4, y + dy*len + py*lean*len*.4];
@@ -943,7 +1068,7 @@ const spawn = o => { if (BITS.length < (calm ? 190 : 460)) BITS.push(Object.assi
 
 // How far out a radial bit has to travel before it is past the camera. Anything
 // beyond this is behind your head.
-const REACH = 640, ASPECT_X = 1.24, ASPECT_Y = .84;
+const ASPECT_X = 1.24, ASPECT_Y = .84;
 const radialPos = b => [b.ox + Math.cos(b.ang)*b.r*ASPECT_X,
                         b.oy + Math.sin(b.ang)*b.r*ASPECT_Y];
 
@@ -1213,9 +1338,10 @@ function bladeDisc(cx, cy, r, blades, angle, lv, paint, sq){
     g.fillStyle = paint; g.beginPath(); g.arc(0,0,r,0,7); g.fill();
     g.globalAlpha = blurT*.80;                                  // smears that survive the blur
     g.strokeStyle = paint; g.lineWidth = r*.16;
-    for (let i = 0; i < blades; i++){
-      const a0 = angle + i/blades*Math.PI*2;
-      g.beginPath(); g.arc(0,0,r*(.52 + .30*(i%2)), a0, a0 + 2.0 - blurT*.7); g.stroke();
+    const smears = Math.min(3, blades);
+    for (let i = 0; i < smears; i++){
+      const a0 = angle + i/smears*Math.PI*2;
+      g.beginPath(); g.arc(0, 0, r*(.42 + .21*i), a0, a0 + 2.2 - blurT*.8); g.stroke();
     }
     g.globalAlpha = blurT*.42;
     g.strokeStyle = C.ink; g.lineWidth = 2.4;
@@ -1242,7 +1368,6 @@ function miniKeys(x, y, n, active, gap, labels){
 const FONT = '"Chalkboard SE","Marker Felt","Comic Sans MS",ui-rounded,system-ui,sans-serif';
 
 // ── 1 · the oscillating fan ─────────────────────────────────────────────────
-const FAN = {bx:470, hy:FLOOR-322, cage:98};
 function drawFan(lv){
   const {bx, cage} = FAN, by = FLOOR, hy = FAN.hy;
   const sweep = (S.pin ? Math.sin(S.headPhase)*.62 : 0);
@@ -1291,7 +1416,6 @@ function drawFan(lv){
 }
 
 // ── 2 · the window air conditioner ──────────────────────────────────────────
-const AC = {x:400, y:130, w:352, h:172};
 let puddle = 0;
 function drawAC(lv){
   const {x, y, w, h} = AC;
@@ -1343,7 +1467,6 @@ function drawAC(lv){
 // ── 3 · the hair dryer ──────────────────────────────────────────────────────
 // Aimed down the barrel at the viewer, which is the whole point: a dryer drawn in
 // profile blows past you, a dryer drawn end-on blows at you.
-const DRY = {cx:596, cy:322};
 function drawDryer(lv){
   const hot = S.mode, cx = DRY.cx, cy = DRY.cy;
   const paint = hot ? C.hot : C.blue, bore = hot ? "#8e2f1e" : "#2f5f6d";
@@ -1404,7 +1527,7 @@ function drawDryer(lv){
 // ── 4 · the palm-leaf fan ───────────────────────────────────────────────────
 function drawHandFan(lv){
   const swing = Math.sin(S.swingPhase) * (.30 + .34*Math.min(1.15, lv));
-  const px = S.handX, py = 588;
+  const px = S.handX, py = HAND.py;
 
   g.save(); g.translate(px, py); g.rotate(swing);
   taperLine([[0,0],[2,-58],[0,-116]], 21, 15, C.brown, .9, 1301);             // bamboo handle
@@ -1438,7 +1561,7 @@ function outletOf(d, lv){
   }
   if (d.id === "ac")    return {x:AC.x + AC.w/2, y:AC.y + AC.h - 6, a0:.04, a1:Math.PI-.04, r0:40, swirl:.30};
   if (d.id === "dryer") return {x:DRY.cx, y:DRY.cy, a0:0, a1:Math.PI*2, r0:52, swirl:1.95};
-  return {x:S.handX, y:376, a0:0, a1:Math.PI*2, r0:70, swirl:.55};
+  return {x:S.handX, y:HAND.leafY, a0:0, a1:Math.PI*2, r0:70, swirl:.55};
 }
 
 function emitFor(dt, lv){
@@ -1515,7 +1638,7 @@ function emitFor(dt, lv){
 
 // Fired once per swing of the hand fan, at the fastest part of the stroke.
 function handSwing(strength){
-  const px = S.handX, py = 376;
+  const px = S.handX, py = HAND.leafY;
   const dir = S.swingSign > 0 ? -.16 : Math.PI + .16;
   if (AU) whoosh(clamp(strength, 0, 1));
   // most of a swing throws air forward, at you; the rest wipes across the frame
@@ -1830,7 +1953,7 @@ function step(dt){
   }
 
   if (d.manual){
-    S.handX += ((S.pointer.inside ? clamp(S.pointer.x, 190, W-190) : 566) - S.handX) * (1 - Math.exp(-dt/.22));
+    S.handX += ((S.pointer.inside ? clamp(S.pointer.x, 170, W-170) : HAND.px) - S.handX) * (1 - Math.exp(-dt/.22));
     if (S.on || S.handBoost > .02){
       const before = Math.sin(S.swingPhase);
       S.swingPhase += dt * (1.0 + 5.0*lv);
@@ -1847,7 +1970,23 @@ function step(dt){
   S.frost += (want - S.frost) * (1 - Math.exp(-dt/2.2));
   puddle = Math.max(0, puddle - dt*.012);
 
+  // Only the air conditioner takes water out of the air; a fan just moves it
+  // around. Simulated, and the plaque says so.
+  const humidTo = (d.id === "ac" && lv > .05) ? (S.mode ? .26 : .50) : .72;
+  S.humid += (humidTo - S.humid) * (1 - Math.exp(-dt/24));
+
   emitFor(dt, lv); stepBits(dt);
+
+  // a nearly-still room still has dust in it
+  if (lv < .05 && !calm){
+    S.dustT += dt;
+    if (S.dustT > 1.6){
+      S.dustT = 0;
+      spawn({k:"fly", ox:-40, oy:H*(.12 + .5*Math.random()), ang:.12 + .12*Math.random(),
+             r:20, v:16 + 12*Math.random(), accel:.16, max:9, r0:3.4,
+             leaf:false, spin:0, dspin:.4, a:.5});
+    }
+  } else { S.dustT = 0; }
 }
 
 function frame(now){
@@ -1867,7 +2006,9 @@ function frame(now){
   g.translate(W/2, H/2); g.scale(zoom, zoom); g.translate(-W/2, -H/2);
   g.translate(vnoise(S.wobbleT*6.3)*5.2*knock, vnoise(S.wobbleT*5.1+11)*3.4*knock);
   drawRoom();
+  drawClock();
   drawCalendar(lv);
+  drawTag(lv);
   drawThermometer();
   if (d.id === "ac")    drawAC(lv);
   if (d.id === "fan")   drawFan(lv);
@@ -1897,7 +2038,7 @@ function frame(now){
   requestAnimationFrame(frame);
 }
 
-buildKeys(); sync();
+fitCanvas(); buildKeys(); sync(); startClock();
 requestAnimationFrame(frame);
 })();
 </script>
