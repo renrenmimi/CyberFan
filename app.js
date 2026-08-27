@@ -35,7 +35,7 @@ const S = {
   rotorAngle: 0, headPhase: 0, wobbleT: 0, drawFrame: 0,
   cycleOn: true, cycleT: 0, cycleGain: 1,
   swingPhase: 0, swingSign: 1, handBoost: 0, handX: 566, pointer: {x:0, y:0, inside:false},
-  dripT: 0, ringT: 0, flyT: 0, dustT: 0, camKick: 0,
+  dripT: 0, ringT: 0, flyT: 0, dustT: 0, camKick: 0, condense: 0, topGearT: 0, stamp: -1,
   temp: AMBIENT, humid: .72, frost: 0, started: false,
 };
 
@@ -529,6 +529,45 @@ function drawThermometer(){
   g.font = "7.5px " + FONT; g.fillStyle = "rgba(36,26,18,.45)";
   g.fillText("SIMULATED", px + pw*.5, py + ph - 6);
   g.textAlign = "left";
+}
+
+// ── the department drops by ─────────────────────────────────────────────────
+// A rubber stamp thumps onto the picture, holds, and fades. It is drawn on the
+// canvas, so it cannot cover a control, and it fires at most once per session.
+const STAMP_KEY = "cyberfan.inspected";
+const stampSpent = () => { try { return !!sessionStorage.getItem(STAMP_KEY); } catch (_){ return false; } };
+const spendStamp = () => { try { sessionStorage.setItem(STAMP_KEY, "1"); } catch (_){} };
+
+function drawStamp(){
+  const t = S.stamp;
+  if (t < 0) return;
+  const cx = W * (portraitScene ? .50 : .63), cy = H * (portraitScene ? .60 : .44);
+  const r = Math.min(W, H) * (portraitScene ? .21 : .19);
+  // thump in, hold, fade out — or, if motion is unwelcome, simply be there
+  const inT = clamp(t/.26, 0, 1);
+  const scale = calm ? 1 : 1 + (1 - ease(inT)) * .7 - Math.sin(inT*Math.PI) * .06;
+  const alpha = (calm ? .78 : .78 * ease(inT)) * clamp((4.6 - t)/.8, 0, 1);
+  if (alpha <= .01) return;
+
+  g.save();
+  g.globalAlpha = alpha;
+  g.translate(cx, cy); g.rotate(-.22); g.scale(scale, scale);
+  const ink = "rgba(150,44,31,.92)";
+  cel(ring(0, 0, r, 30), null, 5.5, {seed:1700, amp:2.4, stroke:ink});
+  cel(ring(0, 0, r*.86, 28), null, 2.6, {seed:1702, amp:2, stroke:ink});
+  g.fillStyle = ink; g.textAlign = "center"; g.textBaseline = "middle";
+  g.font = Math.round(r*.155) + "px " + FONT;
+  g.fillText("DEPT. OF IMAGINARY", 0, -r*.42);
+  g.fillText("COOLING", 0, -r*.24);
+  g.font = "600 " + Math.round(r*.30) + "px " + FONT;
+  g.fillText("INSPECTED", 0, r*.02);
+  taperLine([[-r*.62, r*.22],[r*.62, r*.22]], 4, 4, ink, 1.2, 1704);
+  g.font = Math.round(r*.165) + "px " + FONT;
+  g.fillText(CLOCK.parts ? CLOCK.parts.day + " " + CLOCK.parts.month : "TODAY", 0, r*.42);
+  g.font = Math.round(r*.14) + "px " + FONT;
+  g.fillText("PASSED \u00b7 STILL HOT", 0, r*.62);
+  g.textBaseline = "alphabetic"; g.textAlign = "left";
+  g.restore();
 }
 
 // ── frost creeping in from the edges ────────────────────────────────────────
@@ -1505,8 +1544,10 @@ function step(dt){
   if (d.id === "fan"){
     const sweep = S.pin ? Math.sin(S.headPhase)*.62 : 0;
     const fore  = Math.cos(sweep)*.34 + .66;
+    // the ribbon is whipped by the head's direction as well as by its speed
     stepCloth(dt, FAN.bx + Math.sin(sweep)*20 + Math.cos(-.72)*FAN.cage*fore,
-                  FAN.hy + Math.sin(-.72)*FAN.cage, 90 + 720*lv, -260*lv);
+                  FAN.hy + Math.sin(-.72)*FAN.cage,
+                  (90 + 720*lv) * (1 + sweep*.55), -260*lv);
   }
 
   if (d.manual){
@@ -1531,6 +1572,21 @@ function step(dt){
   // around. Simulated, and the plaque says so.
   const humidTo = (d.id === "ac" && lv > .05) ? (S.mode ? .26 : .50) : .72;
   S.humid += (humidTo - S.humid) * (1 - Math.exp(-dt/24));
+
+  // the window unit fogs its own glass while the compressor is actually pulling
+  const fogTo = (d.id === "ac" && lv > .05) ? .45 + .55*S.cycleGain : 0;
+  S.condense += (fogTo - S.condense) * (1 - Math.exp(-dt/(fogTo > S.condense ? 5 : 12)));
+
+  // ── the inspection stamp ──────────────────────────────────────────────────
+  // Hold anything at its top setting for a while and the department drops by.
+  // Once per page session, and it never touches the controls.
+  const flatOut = S.on && S.gear === d.gears.length - 1 && lv > .92;
+  S.topGearT = flatOut ? S.topGearT + dt : Math.max(0, S.topGearT - dt*2);
+  if (S.stamp < 0 && S.topGearT > 8 && !stampSpent()) { S.stamp = 0; spendStamp(); }
+  if (S.stamp >= 0){
+    S.stamp += dt;
+    if (S.stamp > 4.6) S.stamp = -1;
+  }
 
   emitFor(dt, lv); stepBits(dt);
 
@@ -1572,6 +1628,7 @@ function frame(now){
   if (d.id === "dryer") drawDryer(lv);
   if (d.id === "hand")  drawHandFan(lv);
   drawBits();
+  drawStamp();
   g.restore();
   drawFrost();
   drawGrain();
