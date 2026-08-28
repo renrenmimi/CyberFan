@@ -33,8 +33,9 @@ python3 -m http.server 8000
 | Volume | drag, scroll or arrow the knob |
 
 Nothing makes a sound until you press the button on the curtain, because that is
-the browser's rule. Headphones help; a lot of this sits below 100 Hz. Sound is
-never required to understand anything.
+the browser's rule. That explicit press raises the curtain and starts the selected
+appliance in first gear. Headphones help; a lot of this sits below 100 Hz. Sound
+is never required to understand anything.
 
 ## The wind blows at you, not past you
 
@@ -119,6 +120,10 @@ follower: the same smoothing a motor changing speed already has. The graph is bu
 once, on the first real gesture, and never rebuilt, which is what lets one appliance
 coast down while the next spins up instead of clicking.
 
+When the page is hidden, its render loop is cancelled and the audio context is
+suspended. Returning resets the frame clock before drawing resumes, so a background
+tab neither spends a frame budget nor simulates one large jump when it comes back.
+
 **The ink line boils.** Golden-age cartoons were shot on twos — twelve new drawings
 a second. Motion runs at 60, but every outline is re-wobbled only twelve times a
 second, and the film grain re-seeds on the same clock.
@@ -144,22 +149,24 @@ appliances never moves anything.
 
 ## Verification
 
-`node verify.mjs` — **113 checks**. It imports the appliance table rather than
+`node verify.mjs` — **123 checks**. It imports the appliance table rather than
 scraping it, so the checks and the running app read the same source: gear levels
 ascend to full throttle, every frequency sweep starts above zero, rpm leaves zero
 continuously and rises monotonically, blade-pass partials stay inside the audible
 band, the summed gain of all voices leaves the limiter headroom, coast-down outlasts
 spin-up everywhere, and each gear reaches 95 % of its target in the 3τ its time
-constant promises.
+constant promises. It also checks the canonical and social-card metadata, the
+first-gear curtain contract and the render lifecycle hooks.
 
-`index.html?selftest=1` — **32 assertions** against the live DOM, printed as a
+`index.html?selftest=1` — **35 assertions** against the live DOM, printed as a
 report. Nothing is exposed on `window` and nothing runs without the flag. Layout
 and overflow, plate stability across appliances, control↔state agreement, keyboard
 operation, accessible names, the calendar matching today, a minute refresh, a day
 rollover, interval cleanup, the curtain and its session memory, the status copy, the
 inspection stamp's one-time behaviour, per-appliance paper pull, condensation
-confined to the window unit, mute, reduced motion, and every appliance spinning up,
-running and coasting to a stop.
+confined to the window unit, mute, reduced motion, the first-gear curtain action,
+render-loop pause and resume, and every appliance spinning up, running and coasting
+to a stop.
 
 Green at **320, 360, 390, 720** (which is 1440 at 200 % browser zoom), **768, 900,
 1024 and 1440** px.
