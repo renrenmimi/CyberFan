@@ -1463,6 +1463,10 @@ function wake(){
   raiseCurtain();
 }
 try { if (sessionStorage.getItem(UNLOCK_KEY)) $("curtain").hidden = true; } catch (_){}
+// The window-level pointer listener also wakes audio for every other control.
+// Keep this press local so it cannot begin the curtain's exit before the button's
+// click has selected first gear.
+$("curtain").addEventListener("pointerdown", e => e.stopPropagation());
 $("curtain").addEventListener("click", () => { wake(); setGear(0); });
 addEventListener("pointerdown", wake, {once:false});
 
@@ -1515,6 +1519,34 @@ tabsEl.addEventListener("keydown", e => {
 const FIXED = 1/120, MAX_CATCHUP = .25;
 const effLevel = () => clamp(S.level + (S.dev.manual ? S.handBoost*.72 : 0), 0, 1.12);
 let last = performance.now(), acc = 0, readT = 0;
+let rafId = 0, rendering = false;
+
+function startRenderLoop(){
+  if (rendering) return;
+  rendering = true;
+  last = performance.now();
+  acc = 0;
+  rafId = requestAnimationFrame(frame);
+}
+
+function stopRenderLoop(){
+  rendering = false;
+  if (rafId) cancelAnimationFrame(rafId);
+  rafId = 0;
+  if (AU && AU.ctx.state === "running") AU.ctx.suspend().catch(() => {});
+}
+
+function restoreActivePage(){
+  startRenderLoop();
+  if (S.started && AU && !S.muted && AU.ctx.state !== "running")
+    AU.ctx.resume().catch(() => {});
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopRenderLoop();
+  else restoreActivePage();
+});
+addEventListener("pagehide", stopRenderLoop);
 
 function step(dt){
   const d = S.dev;
@@ -1603,6 +1635,7 @@ function step(dt){
 }
 
 function frame(now){
+  if (!rendering) return;
   const elapsed = Math.min(MAX_CATCHUP, (now - last)/1000);
   last = now; acc += elapsed;
   while (acc >= FIXED){ step(FIXED); acc -= FIXED; }
@@ -1652,11 +1685,11 @@ function frame(now){
     }
     $("vTemp").textContent = S.temp.toFixed(1) + "°";
   }
-  requestAnimationFrame(frame);
+  rafId = requestAnimationFrame(frame);
 }
 
 fitCanvas(); buildKeys(); sync(); startClock();
-requestAnimationFrame(frame);
+startRenderLoop();
 
 // ── self-test ───────────────────────────────────────────────────────────────
 // ?selftest=1 runs the assertions a screenshot cannot make. Nothing below runs,
@@ -1814,16 +1847,27 @@ function runSelfTest(){
   ok("every appliance spins up, runs, and coasts to a stop", phys, physWhy);
   tabsOf()[0].click(); keysOf()[0].click();
 
-  // ── the curtain, and remembering it for this session only ────────────────
+  // ── the curtain, its first gear, and remembering it for this session ─────
   const curtain = document.getElementById("curtain");
   try { sessionStorage.removeItem(UNLOCK_KEY); } catch (_){}
-  curtain.hidden = false;
+  keysOf()[0].click(); curtain.hidden = false;
   const wasCalm2 = calm; setCalm(true);          // the calm path hides it synchronously
-  raiseCurtain();
+  let curtainPressEscaped = false;
+  const catchCurtainPress = () => { curtainPressEscaped = true; };
+  addEventListener("pointerdown", catchCurtainPress, {once:true});
+  curtain.dispatchEvent(new PointerEvent("pointerdown", {bubbles:true}));
+  removeEventListener("pointerdown", catchCurtainPress);
+  ok("the curtain owns its press before the global audio listener",
+     curtainPressEscaped === false);
+  curtain.click();
   ok("the curtain raises and is remembered for the session",
      curtain.hidden === true && sessionStorage.getItem(UNLOCK_KEY) === "1");
+  ok("start the show starts the selected appliance in first gear",
+     S.on === true && S.gear === 0 && phaseOf() === "starting",
+     S.dev.id + " gear " + S.gear + " / " + phaseOf());
   ok("the curtain is a real button for the keyboard",
      curtain.tagName === "BUTTON" && curtain.type === "button");
+  keysOf()[0].click();
   setCalm(wasCalm2);
 
   // ── status copy stays short and answers the state ────────────────────────
@@ -1872,6 +1916,14 @@ function runSelfTest(){
      S.muted !== mutedWas &&
      document.getElementById("mute").getAttribute("aria-pressed") === String(S.muted));
   document.getElementById("mute").click();
+
+  // A hidden page cancels drawing, then resets its frame clock when it returns.
+  stopRenderLoop();
+  const stoppedCleanly = !rendering && rafId === 0;
+  startRenderLoop();
+  ok("the render loop can pause and resume cleanly",
+     stoppedCleanly && rendering && rafId !== 0,
+     "stopped " + stoppedCleanly + ", rendering " + rendering);
 
   // ── report ────────────────────────────────────────────────────────────────
   const pass = res.filter(r => r.pass).length;

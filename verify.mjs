@@ -22,6 +22,22 @@ console.log("DEVICES: " + DEVICES.length + "  ICONS: " + iconKeys.join(",") + "\
 ok(DEVICES.length <= 9, "at most nine appliances, so every one has a digit key");
 ok(new Set(DEVICES.map(d => d.id)).size === DEVICES.length, "appliance ids are unique");
 
+// Link previews are part of the portfolio surface too. Absolute URLs let social
+// crawlers build a useful card without executing the application.
+for (const marker of [
+  'rel="canonical"', 'property="og:title"', 'property="og:description"',
+  'property="og:image"', 'name="twitter:card"', 'name="theme-color"'
+]) ok(html.includes(marker), "document head includes " + marker);
+
+ok(app.includes("startRenderLoop()") && app.includes("stopRenderLoop()"),
+   "the renderer has explicit start and stop lifecycle hooks");
+ok(app.includes('document.addEventListener("visibilitychange"'),
+   "the renderer responds to page visibility");
+ok(app.includes('$("curtain").addEventListener("click", () => { wake(); setGear(0); })'),
+   "Start the show wakes the selected appliance in first gear");
+ok(app.includes('$("curtain").addEventListener("pointerdown", e => e.stopPropagation())'),
+   "the curtain keeps its press ahead of the global audio wake listener");
+
 for (const d of DEVICES){
   const t = "[" + d.id + "] ";
   ok(iconKeys.includes(d.icon), t + "an icon named '" + d.icon + "' exists");
