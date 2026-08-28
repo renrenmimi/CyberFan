@@ -25,7 +25,7 @@
   --sh-3:0 8px 0 var(--ink-3), 0 22px 38px rgba(60,40,20,.20);
   --press:translateY(5px);
 
-  --fs-micro:11px; --fs-small:12.5px; --fs-body:14px; --fs-lead:15px;
+  --fs-micro:12px; --fs-small:13.5px; --fs-body:14.5px; --fs-lead:15.5px;
   --lh-tight:1.25; --lh-body:1.65;
   --track-caps:.13em;
 
@@ -96,7 +96,7 @@ h1 em, h1 b{font-style:normal; font-weight:inherit; color:var(--mustard)}
   transform:rotate(9deg); box-shadow:3px 4px 0 var(--ink-4); text-align:center;
 }
 .seal b{display:block; color:var(--red); font-size:21px; line-height:.9}
-.seal span{display:block; font-size:8.5px; letter-spacing:.08em; text-transform:uppercase; line-height:1.15}
+.seal span{display:block; font-size:9.5px; letter-spacing:.07em; text-transform:uppercase; line-height:1.15}
 
 /* ── appliance tabs ─────────────────────────────────────────────────────────
    A grid, so every card is the same height whatever its label, and the tilt is
@@ -299,7 +299,8 @@ kbd{display:inline-block; min-width:22px; text-align:center; background:var(--cr
         margin-top:var(--sp-2); transform:rotate(-5deg)}
 }
 @media (max-width:640px){
-  :root{--ctl:48px; --ctl-wide:96px; --icon:24px}
+  :root{--ctl:48px; --ctl-wide:96px; --icon:24px;
+        --fs-micro:11.5px; --fs-small:12.5px; --fs-body:14px; --fs-lead:15px}
   .tab{min-height:64px}
   body{padding:var(--sp-4) var(--sp-3) var(--sp-5)}
   .plate{grid-template-columns:repeat(2,minmax(0,1fr));
